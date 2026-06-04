@@ -52,14 +52,13 @@ def is_admin(user_id):
  
 def main_keyboard(user_id=None):
     keyboard = [
-        [KeyboardButton(text="📅 Мои ближайшие смены")],
-        [KeyboardButton(text="📊 Сколько у меня часов")],
-        [KeyboardButton(text="💰 Моя зарплата")],
-        [KeyboardButton(text="💸 Мои штрафы")]
+        [KeyboardButton(text="🏠 Главное меню")],
+        [KeyboardButton(text="📅 Мои смены"), KeyboardButton(text="💰 Моя зарплата")],
+        [KeyboardButton(text="📊 Мои часы"), KeyboardButton(text="💸 Мои штрафы")]
     ]
  
     if user_id and is_admin(user_id):
-        keyboard.append([KeyboardButton(text="👑 Админ-панель")])
+        keyboard.append([KeyboardButton(text="👑 Панель управления")])
  
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
  
@@ -68,12 +67,9 @@ def admin_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="👥 Сотрудники")],
-            [KeyboardButton(text="📋 Подтверждённые смены")],
-            [KeyboardButton(text="⚠️ Проблемные смены")],
-            [KeyboardButton(text="📊 Часы сотрудников")],
-            [KeyboardButton(text="📈 Отчёт за месяц")],
-            [KeyboardButton(text="💰 Зарплаты")],
-            [KeyboardButton(text="📄 Все штрафы")],
+            [KeyboardButton(text="📋 Подтверждённые смены"), KeyboardButton(text="⚠️ Проблемные смены")],
+            [KeyboardButton(text="📊 Часы сотрудников"), KeyboardButton(text="💰 Зарплаты")],
+            [KeyboardButton(text="📈 Отчёт за месяц"), KeyboardButton(text="📄 Все штрафы")],
             [KeyboardButton(text="⬅️ Назад")]
         ],
         resize_keyboard=True
@@ -174,6 +170,45 @@ def get_employee_fines_total(telegram_id):
  
     return count, total
  
+ 
+ 
+ 
+def build_user_dashboard(user_id, first_name=""):
+    telegram_id = str(user_id)
+    employee = find_employee_by_telegram_id(telegram_id) or first_name or "Сотрудник"
+    hours, shifts_count, rate, salary = calculate_salary(telegram_id)
+    fines_count, fines_total = get_employee_fines_total(telegram_id)
+    salary_after_fines = salary - fines_total
+ 
+    future_rows = find_schedule_rows_by_id(telegram_id, only_future=True)
+    upcoming_count = len(future_rows)
+ 
+    if future_rows:
+        try:
+            nearest = sorted(
+                future_rows,
+                key=lambda item: parse_date(item[1].get("date")).date()
+            )[0][1]
+            nearest_text = f"{nearest.get('date')} | {nearest.get('shift')}"
+        except Exception:
+            nearest_text = "есть ближайшие смены"
+    else:
+        nearest_text = "нет ближайших смен"
+ 
+    return (
+        f"🏠 Главное меню\n\n"
+        f"👤 {employee}\n"
+        f"📱 ID: {telegram_id}\n\n"
+        f"📅 Ближайших смен: {upcoming_count}\n"
+        f"🗓 Ближайшая: {nearest_text}\n"
+        f"✅ Подтверждено смен: {shifts_count}\n"
+        f"⏱ Часы: {hours:g}\n\n"
+        f"💵 Ставка: {rate:g} ₽/час\n"
+        f"💰 Начислено: {salary:g} ₽\n"
+        f"💸 Штрафы: {fines_total:g} ₽\n"
+        f"✅ К выплате: {salary_after_fines:g} ₽\n\n"
+        f"Выбери раздел ниже 👇"
+    )
  
 def split_long_text(text, limit=3500):
     parts = []
@@ -278,14 +313,23 @@ def employees_keyboard():
 def employee_card_keyboard(telegram_id):
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Добавить смену", callback_data=f"empact:add:{telegram_id}")],
-            [InlineKeyboardButton(text="📣 Отправить напоминание", callback_data=f"empact:remind:{telegram_id}")],
-            [InlineKeyboardButton(text="✏️ Изменить смену", callback_data=f"empact:edit:{telegram_id}")],
-            [InlineKeyboardButton(text="❌ Удалить смену", callback_data=f"empact:delete:{telegram_id}")],
-            [InlineKeyboardButton(text="📅 Смены сотрудника", callback_data=f"empact:shifts:{telegram_id}")],
-            [InlineKeyboardButton(text="💸 Выписать штраф", callback_data=f"empact:fine:{telegram_id}")],
-            [InlineKeyboardButton(text="📊 Часы", callback_data=f"empact:hours:{telegram_id}")],
-            [InlineKeyboardButton(text="💰 Зарплата", callback_data=f"empact:salary:{telegram_id}")]
+            [
+                InlineKeyboardButton(text="➕ Смена", callback_data=f"empact:add:{telegram_id}"),
+                InlineKeyboardButton(text="📣 Напомнить", callback_data=f"empact:remind:{telegram_id}")
+            ],
+            [
+                InlineKeyboardButton(text="✏️ Изменить", callback_data=f"empact:edit:{telegram_id}"),
+                InlineKeyboardButton(text="❌ Удалить", callback_data=f"empact:delete:{telegram_id}")
+            ],
+            [
+                InlineKeyboardButton(text="📅 График", callback_data=f"empact:shifts:{telegram_id}"),
+                InlineKeyboardButton(text="📊 Часы", callback_data=f"empact:hours:{telegram_id}")
+            ],
+            [
+                InlineKeyboardButton(text="💰 Зарплата", callback_data=f"empact:salary:{telegram_id}"),
+                InlineKeyboardButton(text="💸 Штраф", callback_data=f"empact:fine:{telegram_id}")
+            ],
+            [InlineKeyboardButton(text="⬅️ К списку сотрудников", callback_data="employees:list")]
         ]
     )
  
@@ -370,14 +414,20 @@ def shift_rows_keyboard(action, telegram_id, rows):
 async def start_handler(message: types.Message):
     user_id = message.from_user.id
  
-    text = (
-        f"Привет, {message.from_user.first_name}!\n\n"
-        f"Твой Telegram ID:\n"
-        f"{user_id}\n\n"
-        f"Передай этот ID администратору."
-    )
- 
+    text = build_user_dashboard(user_id, message.from_user.first_name)
     await message.answer(text, reply_markup=main_keyboard(user_id))
+ 
+ 
+ 
+ 
+@dp.message(Command("menu"))
+@dp.message(F.text == "🏠 Главное меню")
+async def menu_handler(message: types.Message):
+    user_id = message.from_user.id
+    await message.answer(
+        build_user_dashboard(user_id, message.from_user.first_name),
+        reply_markup=main_keyboard(user_id)
+    )
  
  
 @dp.message(Command("test"))
@@ -390,16 +440,16 @@ async def test_command(message: types.Message):
 async def back_button(message: types.Message):
     pending_fines.pop(message.from_user.id, None)
     pending_shift_inputs.pop(message.from_user.id, None)
-    await message.answer("Главное меню", reply_markup=main_keyboard(message.from_user.id))
+    await message.answer(build_user_dashboard(message.from_user.id, message.from_user.first_name), reply_markup=main_keyboard(message.from_user.id))
  
  
-@dp.message(F.text == "👑 Админ-панель")
+@dp.message(F.text.in_(["👑 Админ-панель", "👑 Панель управления"]))
 async def admin_panel(message: types.Message):
     if not is_admin(message.from_user.id):
         await message.answer("У тебя нет доступа к админ-панели.")
         return
  
-    await message.answer("👑 Админ-панель", reply_markup=admin_keyboard())
+    await message.answer("👑 Панель управления\n\n👥 Сотрудники\n📊 Отчёты\n💰 Финансы\n⚠️ Контроль смен", reply_markup=admin_keyboard())
  
  
 @dp.message(F.text == "👥 Сотрудники")
@@ -414,7 +464,7 @@ async def employees_list(message: types.Message):
         return
  
     await message.answer(
-        f"👥 Сотрудники с Telegram ID: {len(employees)}\n\nВыбери сотрудника:",
+        f"👥 Сотрудники\n\nВсего подключено: {len(employees)}\nВыбери сотрудника:",
         reply_markup=employees_keyboard()
     )
  
@@ -431,17 +481,43 @@ async def employee_card(callback: types.CallbackQuery):
     hours, shifts_count, rate, salary = calculate_salary(telegram_id)
     fines_count, fines_total = get_employee_fines_total(telegram_id)
  
+    salary_after_fines = salary - fines_total
+    future_rows = find_schedule_rows_by_id(telegram_id, only_future=True)
+ 
     await callback.message.answer(
+        f"👤 Карточка сотрудника\n\n"
         f"👤 {employee}\n"
-        f"ID: {telegram_id}\n\n"
-        f"📊 Подтверждено смен: {shifts_count}\n"
-        f"⏱ Часы: {hours:g}\n"
+        f"📱 ID: {telegram_id}\n\n"
+        f"📅 Ближайших смен: {len(future_rows)}\n"
+        f"✅ Подтверждено смен: {shifts_count}\n"
+        f"⏱ Часы: {hours:g}\n\n"
         f"💵 Ставка: {rate:g} ₽/час\n"
-        f"💰 Зарплата: {salary:g} ₽\n"
-        f"💸 Штрафы: {fines_total:g} ₽\n\n"
-        f"Выбери действие:",
+        f"💰 Начислено: {salary:g} ₽\n"
+        f"💸 Штрафы: {fines_total:g} ₽\n"
+        f"✅ К выплате: {salary_after_fines:g} ₽\n\n"
+        f"Выбери действие 👇",
         reply_markup=employee_card_keyboard(telegram_id)
     )
+    await callback.answer()
+ 
+ 
+ 
+ 
+@dp.callback_query(F.data == "employees:list")
+async def employees_list_callback(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+ 
+    employees = get_employees()
+    if not employees:
+        await callback.message.answer("Пока нет сотрудников с Telegram ID в таблице schedule.")
+    else:
+        await callback.message.answer(
+            f"👥 Сотрудники\n\nВсего подключено: {len(employees)}\nВыбери сотрудника:",
+            reply_markup=employees_keyboard()
+        )
+ 
     await callback.answer()
  
  
@@ -707,7 +783,7 @@ async def noop(callback: types.CallbackQuery):
 # REPORTS AND EMPLOYEE BUTTONS
 # =========================
  
-@dp.message(F.text == "📅 Мои ближайшие смены")
+@dp.message(F.text.in_(["📅 Мои ближайшие смены", "📅 Мои смены"]))
 async def my_upcoming_shifts(message: types.Message):
     telegram_id = str(message.from_user.id)
     records = sheet.get_all_records()
@@ -733,10 +809,10 @@ async def my_upcoming_shifts(message: types.Message):
         return
  
     shifts.sort(key=lambda item: item[0])
-    await message.answer("📅 Твои ближайшие смены:\n\n" + "\n".join([item[1] for item in shifts[:10]]))
+    await message.answer("📅 Мои смены\n\n" + "\n".join([item[1] for item in shifts[:10]]))
  
  
-@dp.message(F.text == "📊 Сколько у меня часов")
+@dp.message(F.text.in_(["📊 Сколько у меня часов", "📊 Мои часы"]))
 async def hours_button(message: types.Message):
     telegram_id = str(message.from_user.id)
     records = sheet.get_all_records()
@@ -1118,7 +1194,7 @@ scheduler.add_job(send_shift_notifications, trigger="cron", hour=20, minute=0)
  
 async def main():
     scheduler.start()
-    print("Бот запущен V13 UI salary")
+    print("Бот запущен V14 beautiful UI")
     await dp.start_polling(bot)
  
  
