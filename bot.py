@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 import gspread
 from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
@@ -49,7 +50,7 @@ sheet = client.open(SPREADSHEET_NAME).worksheet("schedule")
 # START
 # =========================
 
-@dp.message()
+@dp.message(Command("start"))
 async def start_handler(message: types.Message):
     user_id = message.from_user.id
 
@@ -61,6 +62,15 @@ async def start_handler(message: types.Message):
     )
 
     await message.answer(text)
+
+# =========================
+# TEST
+# =========================
+
+@dp.message(Command("test"))
+async def test_command(message: types.Message):
+    await send_shift_notifications()
+    await message.answer("Тест уведомлений запущен")
 
 # =========================
 # NOTIFICATIONS
@@ -77,7 +87,6 @@ async def send_shift_notifications():
     print(f"Проверяем смены на {tomorrow}")
 
     for row in records:
-
         try:
             employee = row["employee"]
             telegram_id = str(row["telegram_id"]).strip()
@@ -102,12 +111,7 @@ async def send_shift_notifications():
 
         except Exception as e:
             print(f"Ошибка: {e}")
-from aiogram.filters import Command
 
-@dp.message(Command("test"))
-async def test_command(message: types.Message):
-    await send_shift_notifications()
-    await message.answer("Тест уведомлений запущен")
 # =========================
 # SCHEDULER
 # =========================
