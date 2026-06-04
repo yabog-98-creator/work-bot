@@ -70,6 +70,7 @@ def admin_keyboard():
             [KeyboardButton(text="📋 Подтверждённые смены")],
             [KeyboardButton(text="⚠️ Проблемные смены")],
             [KeyboardButton(text="📊 Часы сотрудников")],
+            [KeyboardButton(text="📈 Отчёт за месяц")],
             [KeyboardButton(text="⬅️ Назад")]
         ],
         resize_keyboard=True
@@ -92,6 +93,11 @@ def parse_hours(shift):
         end += 24
  
     return end - start
+ 
+ 
+def parse_sheet_date(value):
+    value = str(value).strip()
+    return datetime.strptime(value, "%d.%m.%Y")
  
  
 @dp.message(Command("start"))
@@ -210,6 +216,58 @@ async def admin_employee_hours(message: types.Message):
     await message.answer("📊 Часы сотрудников:\n\n" + "\n".join(lines))
  
  
+@dp.message(F.text == "📈 Отчёт за месяц")
+async def admin_month_report(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+ 
+    now = datetime.now()
+    records = sheet.get_all_records()
+    totals = {}
+    shifts_count = {}
+ 
+    for row in records:
+        try:
+            if str(row.get("confirmed", "")).strip().upper() != "YES":
+                continue
+ 
+            shift_date = parse_sheet_date(row.get("date"))
+ 
+            if shift_date.month != now.month or shift_date.year != now.year:
+                continue
+ 
+            employee = row.get("employee")
+            hours = row.get("confirmed_hours") or row.get("hours") or 0
+            hours = float(hours)
+ 
+            totals[employee] = totals.get(employee, 0) + hours
+            shifts_count[employee] = shifts_count.get(employee, 0) + 1
+ 
+        except Exception:
+            pass
+ 
+    if not totals:
+        await message.answer("За текущий месяц пока нет подтверждённых смен.")
+        return
+ 
+    lines = []
+    total_all = 0
+ 
+    for employee, hours in totals.items():
+        total_all += hours
+        lines.append(
+            f"👤 {employee}: {hours:g} ч. | смен: {shifts_count.get(employee, 0)}"
+        )
+ 
+    text = (
+        f"📈 Отчёт за месяц {now.strftime('%m.%Y')}\n\n"
+        + "\n".join(lines)
+        + f"\n\nИтого часов: {total_all:g}"
+    )
+ 
+    await message.answer(text)
+ 
+ 
 @dp.message(F.text == "📊 Сколько у меня часов")
 async def hours_button(message: types.Message):
     telegram_id = str(message.from_user.id)
@@ -298,10 +356,19 @@ async def confirm_shift(callback: types.CallbackQuery):
     shift_date = row[headers["date"] - 1]
     shift = row[headers["shift"] - 1]
  
-    hours = parse_hours(shift)
- 
     confirmed_col = headers["confirmed"]
     hours_col = headers.get("confirmed_hours") or headers.get("hours")
+ 
+    current_confirmed = ""
+    if len(row) >= confirmed_col:
+        current_confirmed = str(row[confirmed_col - 1]).strip().upper()
+ 
+    if current_confirmed == "YES":
+        await callback.answer("Эта смена уже подтверждена", show_alert=True)
+        await callback.message.answer("✅ Эта смена уже была подтверждена ранее.")
+        return
+ 
+    hours = parse_hours(shift)
  
     sheet.update_cell(row_number, confirmed_col, "YES")
     sheet.update_cell(row_number, hours_col, hours)
@@ -390,7 +457,7 @@ scheduler.add_job(
  
 async def main():
     scheduler.start()
-    print("Бот запущен V4")
+    print("Бот запущен V5")
     await dp.start_polling(bot)
  
  
