@@ -35,6 +35,7 @@ spreadsheet = client.open(SPREADSHEET_NAME)
 sheet = spreadsheet.worksheet("schedule")
 problems_sheet = spreadsheet.worksheet("problems")
 fines_sheet = spreadsheet.worksheet("fines")
+rates_sheet = spreadsheet.worksheet("rates")
  
 pending_problems = {}
 pending_fines = {}
@@ -53,6 +54,7 @@ def main_keyboard(user_id=None):
     keyboard = [
         [KeyboardButton(text="📅 Мои ближайшие смены")],
         [KeyboardButton(text="📊 Сколько у меня часов")],
+        [KeyboardButton(text="💰 Моя зарплата")],
         [KeyboardButton(text="💸 Мои штрафы")]
     ]
  
@@ -70,6 +72,7 @@ def admin_keyboard():
             [KeyboardButton(text="⚠️ Проблемные смены")],
             [KeyboardButton(text="📊 Часы сотрудников")],
             [KeyboardButton(text="📈 Отчёт за месяц")],
+            [KeyboardButton(text="💰 Зарплаты")],
             [KeyboardButton(text="📄 Все штрафы")],
             [KeyboardButton(text="⬅️ Назад")]
         ],
@@ -123,6 +126,53 @@ def get_confirmed_hours(row):
         pass
  
     return 0
+ 
+ 
+ 
+def get_employee_rate(telegram_id):
+    records = rates_sheet.get_all_records()
+ 
+    for row in records:
+        if str(row.get("telegram_id", "")).strip() == str(telegram_id).strip():
+            try:
+                return float(row.get("rate", 0))
+            except Exception:
+                return 0
+ 
+    return 0
+ 
+ 
+def calculate_salary(telegram_id):
+    records = sheet.get_all_records()
+    total_hours = 0
+    confirmed_count = 0
+ 
+    for row in records:
+        if str(row.get("telegram_id", "")).strip() == str(telegram_id).strip():
+            if str(row.get("confirmed", "")).strip().upper() == "YES":
+                total_hours += get_confirmed_hours(row)
+                confirmed_count += 1
+ 
+    rate = get_employee_rate(telegram_id)
+    salary = total_hours * rate
+ 
+    return total_hours, confirmed_count, rate, salary
+ 
+ 
+def get_employee_fines_total(telegram_id):
+    records = fines_sheet.get_all_records()
+    total = 0
+    count = 0
+ 
+    for row in records:
+        if str(row.get("telegram_id", "")).strip() == str(telegram_id).strip():
+            try:
+                total += float(row.get("amount", 0))
+                count += 1
+            except Exception:
+                pass
+ 
+    return count, total
  
  
 def split_long_text(text, limit=3500):
@@ -234,7 +284,8 @@ def employee_card_keyboard(telegram_id):
             [InlineKeyboardButton(text="❌ Удалить смену", callback_data=f"empact:delete:{telegram_id}")],
             [InlineKeyboardButton(text="📅 Смены сотрудника", callback_data=f"empact:shifts:{telegram_id}")],
             [InlineKeyboardButton(text="💸 Выписать штраф", callback_data=f"empact:fine:{telegram_id}")],
-            [InlineKeyboardButton(text="📊 Часы", callback_data=f"empact:hours:{telegram_id}")]
+            [InlineKeyboardButton(text="📊 Часы", callback_data=f"empact:hours:{telegram_id}")],
+            [InlineKeyboardButton(text="💰 Зарплата", callback_data=f"empact:salary:{telegram_id}")]
         ]
     )
  
@@ -377,8 +428,18 @@ async def employee_card(callback: types.CallbackQuery):
     telegram_id = callback.data.split(":")[1]
     employee = find_employee_by_telegram_id(telegram_id) or "Неизвестный сотрудник"
  
+    hours, shifts_count, rate, salary = calculate_salary(telegram_id)
+    fines_count, fines_total = get_employee_fines_total(telegram_id)
+ 
     await callback.message.answer(
-        f"👤 {employee}\nID: {telegram_id}\n\nВыбери действие:",
+        f"👤 {employee}\n"
+        f"ID: {telegram_id}\n\n"
+        f"📊 Подтверждено смен: {shifts_count}\n"
+        f"⏱ Часы: {hours:g}\n"
+        f"💵 Ставка: {rate:g} ₽/час\n"
+        f"💰 Зарплата: {salary:g} ₽\n"
+        f"💸 Штрафы: {fines_total:g} ₽\n\n"
+        f"Выбери действие:",
         reply_markup=employee_card_keyboard(telegram_id)
     )
     await callback.answer()
@@ -464,6 +525,22 @@ async def employee_action(callback: types.CallbackQuery):
                 total += get_confirmed_hours(row)
                 count += 1
         await callback.message.answer(f"📊 {employee}\n\nПодтверждено смен: {count}\nВсего часов: {total:g}")
+ 
+    elif action == "salary":
+        hours, shifts_count, rate, salary = calculate_salary(telegram_id)
+        fines_count, fines_total = get_employee_fines_total(telegram_id)
+        salary_after_fines = salary - fines_total
+ 
+        await callback.message.answer(
+            f"💰 Зарплата сотрудника\n\n"
+            f"👤 {employee}\n"
+            f"📊 Смен: {shifts_count}\n"
+            f"⏱ Часы: {hours:g}\n"
+            f"💵 Ставка: {rate:g} ₽/час\n"
+            f"💰 Начислено: {salary:g} ₽\n"
+            f"💸 Штрафы: {fines_total:g} ₽\n"
+            f"✅ Итого к выплате: {salary_after_fines:g} ₽"
+        )
  
     await callback.answer()
  
@@ -677,6 +754,73 @@ async def hours_button(message: types.Message):
         f"Подтверждено смен: {confirmed_count}\n"
         f"Всего часов: {total_hours:g}"
     )
+ 
+ 
+ 
+@dp.message(F.text == "💰 Моя зарплата")
+async def my_salary(message: types.Message):
+    telegram_id = str(message.from_user.id)
+    hours, shifts_count, rate, salary = calculate_salary(telegram_id)
+    fines_count, fines_total = get_employee_fines_total(telegram_id)
+    salary_after_fines = salary - fines_total
+ 
+    if rate == 0:
+        await message.answer(
+            "💰 Моя зарплата\n\n"
+            "Для тебя ещё не указана ставка в таблице rates.\n"
+            "Обратись к администратору."
+        )
+        return
+ 
+    await message.answer(
+        f"💰 Моя зарплата\n\n"
+        f"📊 Подтверждено смен: {shifts_count}\n"
+        f"⏱ Часы: {hours:g}\n"
+        f"💵 Ставка: {rate:g} ₽/час\n"
+        f"💰 Начислено: {salary:g} ₽\n"
+        f"💸 Штрафы: {fines_total:g} ₽\n"
+        f"✅ Итого к выплате: {salary_after_fines:g} ₽"
+    )
+ 
+ 
+@dp.message(F.text == "💰 Зарплаты")
+async def admin_all_salaries(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+ 
+    employees = get_employees()
+ 
+    if not employees:
+        await message.answer("Нет сотрудников с Telegram ID.")
+        return
+ 
+    lines = []
+    total_salary = 0
+    total_after_fines = 0
+ 
+    for telegram_id, employee in employees:
+        hours, shifts_count, rate, salary = calculate_salary(telegram_id)
+        _, fines_total = get_employee_fines_total(telegram_id)
+        after_fines = salary - fines_total
+        total_salary += salary
+        total_after_fines += after_fines
+ 
+        lines.append(
+            f"👤 {employee}\n"
+            f"⏱ {hours:g} ч. × {rate:g} ₽ = {salary:g} ₽\n"
+            f"💸 Штрафы: {fines_total:g} ₽\n"
+            f"✅ К выплате: {after_fines:g} ₽"
+        )
+ 
+    text = (
+        "💰 Зарплаты сотрудников\n\n"
+        + "\n\n".join(lines)
+        + f"\n\nИтого начислено: {total_salary:g} ₽"
+        + f"\nИтого к выплате: {total_after_fines:g} ₽"
+    )
+ 
+    for part in split_long_text(text):
+        await message.answer(part)
  
  
 @dp.message(F.text == "📋 Подтверждённые смены")
@@ -974,7 +1118,7 @@ scheduler.add_job(send_shift_notifications, trigger="cron", hour=20, minute=0)
  
 async def main():
     scheduler.start()
-    print("Бот запущен V10 employees calendar")
+    print("Бот запущен V13 UI salary")
     await dp.start_polling(bot)
  
  
