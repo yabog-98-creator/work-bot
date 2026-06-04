@@ -133,7 +133,7 @@ async def main():
 
     scheduler.start()
 
-    print("Бот запущен")
+    print("Бот запущен V2")
 
     await dp.start_polling(bot)
 
