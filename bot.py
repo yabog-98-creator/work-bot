@@ -102,7 +102,12 @@ async def send_shift_notifications():
 
         except Exception as e:
             print(f"Ошибка: {e}")
+from aiogram.filters import Command
 
+@dp.message(Command("test"))
+async def test_command(message: types.Message):
+    await send_shift_notifications()
+    await message.answer("Тест уведомлений запущен")
 # =========================
 # SCHEDULER
 # =========================
