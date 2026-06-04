@@ -176,6 +176,7 @@ def get_employee_fines_total(telegram_id):
 def build_user_dashboard(user_id, first_name=""):
     telegram_id = str(user_id)
     employee = find_employee_by_telegram_id(telegram_id) or first_name or "Сотрудник"
+ 
     hours, shifts_count, rate, salary = calculate_salary(telegram_id)
     fines_count, fines_total = get_employee_fines_total(telegram_id)
     salary_after_fines = salary - fines_total
@@ -183,31 +184,46 @@ def build_user_dashboard(user_id, first_name=""):
     future_rows = find_schedule_rows_by_id(telegram_id, only_future=True)
     upcoming_count = len(future_rows)
  
+    next_shift_block = "📌 Следующая смена\nСмен пока нет"
+ 
     if future_rows:
         try:
-            nearest = sorted(
+            sorted_rows = sorted(
                 future_rows,
                 key=lambda item: parse_date(item[1].get("date")).date()
-            )[0][1]
-            nearest_text = f"{nearest.get('date')} | {nearest.get('shift')}"
+            )
+            next_row = sorted_rows[0][1]
+            next_date = str(next_row.get("date", "")).strip()
+            next_shift = str(next_row.get("shift", "")).strip()
+            next_hours = parse_hours(next_shift)
+            confirmed = str(next_row.get("confirmed", "")).strip().upper()
+            status = "✅ Подтверждена" if confirmed == "YES" else "⏳ Ожидает подтверждения"
+ 
+            next_shift_block = (
+                f"📌 Следующая смена\n"
+                f"📅 {next_date}\n"
+                f"🕒 {next_shift}\n"
+                f"⏱ {next_hours} ч.\n"
+                f"{status}"
+            )
         except Exception:
-            nearest_text = "есть ближайшие смены"
-    else:
-        nearest_text = "нет ближайших смен"
+            next_shift_block = "📌 Следующая смена\nЕсть ближайшие смены"
+ 
+    rate_text = f"{rate:g} ₽/час" if rate else "ставка не указана"
  
     return (
         f"🏠 Главное меню\n\n"
-        f"👤 {employee}\n"
-        f"📱 ID: {telegram_id}\n\n"
+        f"👋 Привет, {employee}!\n\n"
+        f"{next_shift_block}\n\n"
+        f"📊 Мой баланс\n"
         f"📅 Ближайших смен: {upcoming_count}\n"
-        f"🗓 Ближайшая: {nearest_text}\n"
         f"✅ Подтверждено смен: {shifts_count}\n"
-        f"⏱ Часы: {hours:g}\n\n"
-        f"💵 Ставка: {rate:g} ₽/час\n"
-        f"💰 Начислено: {salary:g} ₽\n"
+        f"⏱ Отработано часов: {hours:g}\n\n"
+        f"💰 Финансы\n"
+        f"💵 Ставка: {rate_text}\n"
         f"💸 Штрафы: {fines_total:g} ₽\n"
         f"✅ К выплате: {salary_after_fines:g} ₽\n\n"
-        f"Выбери раздел ниже 👇"
+        f"Выбери действие ниже 👇"
     )
  
 def split_long_text(text, limit=3500):
@@ -1194,7 +1210,7 @@ scheduler.add_job(send_shift_notifications, trigger="cron", hour=20, minute=0)
  
 async def main():
     scheduler.start()
-    print("Бот запущен V14 beautiful UI")
+    print("Бот запущен V15 employee home")
     await dp.start_polling(bot)
  
  
