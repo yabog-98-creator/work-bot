@@ -45,6 +45,7 @@ def is_admin(user_id):
  
 def main_keyboard(user_id=None):
     keyboard = [
+        [KeyboardButton(text="📅 Мои ближайшие смены")],
         [KeyboardButton(text="📊 Сколько у меня часов")],
         [KeyboardButton(text="💸 Мои штрафы")]
     ]
@@ -85,6 +86,18 @@ def parse_hours(shift):
         end += 24
  
     return end - start
+ 
+ 
+def parse_date(date_value):
+    date_text = str(date_value).strip()
+ 
+    for fmt in ["%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d"]:
+        try:
+            return datetime.strptime(date_text, fmt).date()
+        except Exception:
+            pass
+ 
+    return None
  
  
 def get_row_value(row, headers, column_name):
@@ -164,6 +177,76 @@ async def test_command(message: types.Message):
 @dp.message(F.text == "⬅️ Назад")
 async def back_button(message: types.Message):
     await message.answer("Главное меню", reply_markup=main_keyboard(message.from_user.id))
+ 
+ 
+@dp.message(F.text == "📅 Мои ближайшие смены")
+async def my_upcoming_shifts(message: types.Message):
+    telegram_id = str(message.from_user.id)
+    today = datetime.now().date()
+    records = sheet.get_all_records()
+    upcoming = []
+ 
+    for row in records:
+        if str(row.get("telegram_id")).strip() != telegram_id:
+            continue
+ 
+        shift_date = parse_date(row.get("date"))
+        if not shift_date:
+            continue
+ 
+        if shift_date < today:
+            continue
+ 
+        shift = str(row.get("shift", "")).strip()
+ 
+        try:
+            hours = parse_hours(shift)
+        except Exception:
+            hours = "?"
+ 
+        confirmed = str(row.get("confirmed", "")).strip().upper()
+        status = "✅ подтверждена" if confirmed == "YES" else "⏳ не подтверждена"
+ 
+        upcoming.append({
+            "date_obj": shift_date,
+            "date": row.get("date"),
+            "shift": shift,
+            "hours": hours,
+            "status": status
+        })
+ 
+    upcoming.sort(key=lambda item: item["date_obj"])
+    upcoming = upcoming[:10]
+ 
+    if not upcoming:
+        await message.answer("📅 У тебя пока нет ближайших смен.")
+        return
+ 
+    lines = []
+    total_hours = 0
+ 
+    for item in upcoming:
+        if isinstance(item["hours"], (int, float)):
+            total_hours += item["hours"]
+            hours_text = f"{item['hours']:g} ч."
+        else:
+            hours_text = "не удалось посчитать"
+ 
+        lines.append(
+            f"📅 {item['date']}\n"
+            f"🕒 {item['shift']}\n"
+            f"⏱ {hours_text}\n"
+            f"Статус: {item['status']}"
+        )
+ 
+    text = (
+        "📅 Твои ближайшие смены:\n\n"
+        + "\n\n".join(lines)
+        + f"\n\nВсего часов в списке: {total_hours:g}"
+    )
+ 
+    for part in split_long_text(text):
+        await message.answer(part)
  
  
 @dp.message(F.text == "👑 Админ-панель")
@@ -652,7 +735,7 @@ scheduler.add_job(
  
 async def main():
     scheduler.start()
-    print("Бот запущен V6 fines")
+    print("Бот запущен V7 upcoming shifts")
     await dp.start_polling(bot)
  
  
