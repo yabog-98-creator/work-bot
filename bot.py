@@ -1,6 +1,7 @@
 import asyncio
 import os
 import json
+import calendar
 from datetime import datetime, timedelta
  
 import gspread
@@ -37,8 +38,12 @@ fines_sheet = spreadsheet.worksheet("fines")
  
 pending_problems = {}
 pending_fines = {}
-pending_shift_actions = {}
+pending_shift_inputs = {}
  
+ 
+# =========================
+# HELPERS
+# =========================
  
 def is_admin(user_id):
     return int(user_id) == ADMIN_ID
@@ -60,15 +65,11 @@ def main_keyboard(user_id=None):
 def admin_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="➕ Добавить смену")],
-            [KeyboardButton(text="📣 Отправить напоминание")],
-            [KeyboardButton(text="✏️ Изменить смену")],
-            [KeyboardButton(text="❌ Удалить смену")],
+            [KeyboardButton(text="👥 Сотрудники")],
             [KeyboardButton(text="📋 Подтверждённые смены")],
             [KeyboardButton(text="⚠️ Проблемные смены")],
             [KeyboardButton(text="📊 Часы сотрудников")],
             [KeyboardButton(text="📈 Отчёт за месяц")],
-            [KeyboardButton(text="💸 Выписать штраф")],
             [KeyboardButton(text="📄 Все штрафы")],
             [KeyboardButton(text="⬅️ Назад")]
         ],
@@ -126,56 +127,73 @@ def get_confirmed_hours(row):
  
 def split_long_text(text, limit=3500):
     parts = []
- 
     while len(text) > limit:
         cut = text.rfind("\n", 0, limit)
         if cut == -1:
             cut = limit
         parts.append(text[:cut])
         text = text[cut:].strip()
- 
     if text:
         parts.append(text)
- 
     return parts
  
  
-def find_employee_by_telegram_id(telegram_id):
+def get_employees():
     records = sheet.get_all_records()
+    employees = {}
  
     for row in records:
-        if str(row.get("telegram_id")).strip() == str(telegram_id).strip():
-            return row.get("employee")
+        employee = str(row.get("employee", "")).strip()
+        telegram_id = str(row.get("telegram_id", "")).strip()
  
+        if employee and telegram_id and telegram_id.lower() not in ["none", "nan"]:
+            employees[telegram_id] = employee
+ 
+    return sorted(employees.items(), key=lambda item: item[1].lower())
+ 
+ 
+def find_employee_by_telegram_id(telegram_id):
+    for tid, employee in get_employees():
+        if str(tid) == str(telegram_id):
+            return employee
     return None
  
  
-def find_schedule_rows_by_id_and_date(telegram_id, date_text):
+def find_schedule_rows_by_id(telegram_id, only_future=False):
     records = sheet.get_all_records()
     result = []
+    today = datetime.now().date()
  
     for index, row in enumerate(records, start=2):
-        if str(row.get("telegram_id")).strip() == str(telegram_id).strip() and str(row.get("date")).strip() == str(date_text).strip():
-            result.append((index, row))
+        if str(row.get("telegram_id", "")).strip() != str(telegram_id).strip():
+            continue
+ 
+        if only_future:
+            try:
+                shift_date = parse_date(row.get("date")).date()
+                if shift_date < today:
+                    continue
+            except Exception:
+                continue
+ 
+        result.append((index, row))
  
     return result
+ 
+ 
+def find_schedule_rows_by_id_and_date(telegram_id, date_text):
+    rows = []
+    for index, row in find_schedule_rows_by_id(telegram_id):
+        if str(row.get("date", "")).strip() == str(date_text).strip():
+            rows.append((index, row))
+    return rows
  
  
 async def send_shift_message(telegram_id, employee, shift_date, shift, row_number, title="📅 Напоминание о смене"):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Подтвердить смену",
-                    callback_data=f"confirm:{row_number}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⚠️ Не могу выйти",
-                    callback_data=f"problem:{row_number}"
-                )
-            ]
+            [InlineKeyboardButton(text="✅ Подтвердить смену", callback_data=f"confirm:{row_number}")],
+            [InlineKeyboardButton(text="⚠️ Не могу выйти", callback_data=f"problem:{row_number}")]
         ]
     )
  
@@ -189,12 +207,113 @@ async def send_shift_message(telegram_id, employee, shift_date, shift, row_numbe
         f"⏱ Часы: {hours}"
     )
  
-    await bot.send_message(
-        chat_id=int(telegram_id),
-        text=text,
-        reply_markup=keyboard
+    await bot.send_message(chat_id=int(telegram_id), text=text, reply_markup=keyboard)
+ 
+ 
+def employees_keyboard():
+    employees = get_employees()
+    buttons = []
+ 
+    for telegram_id, employee in employees:
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"👤 {employee}",
+                callback_data=f"emp:{telegram_id}"
+            )
+        ])
+ 
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+ 
+ 
+def employee_card_keyboard(telegram_id):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Добавить смену", callback_data=f"empact:add:{telegram_id}")],
+            [InlineKeyboardButton(text="📣 Отправить напоминание", callback_data=f"empact:remind:{telegram_id}")],
+            [InlineKeyboardButton(text="✏️ Изменить смену", callback_data=f"empact:edit:{telegram_id}")],
+            [InlineKeyboardButton(text="❌ Удалить смену", callback_data=f"empact:delete:{telegram_id}")],
+            [InlineKeyboardButton(text="📅 Смены сотрудника", callback_data=f"empact:shifts:{telegram_id}")],
+            [InlineKeyboardButton(text="💸 Выписать штраф", callback_data=f"empact:fine:{telegram_id}")],
+            [InlineKeyboardButton(text="📊 Часы", callback_data=f"empact:hours:{telegram_id}")]
+        ]
     )
  
+ 
+def calendar_keyboard(action, telegram_id, year=None, month=None):
+    now = datetime.now()
+    year = year or now.year
+    month = month or now.month
+ 
+    month_name = [
+        "", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+        "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
+    ][month]
+ 
+    prev_month = month - 1
+    prev_year = year
+    if prev_month == 0:
+        prev_month = 12
+        prev_year -= 1
+ 
+    next_month = month + 1
+    next_year = year
+    if next_month == 13:
+        next_month = 1
+        next_year += 1
+ 
+    buttons = [
+        [
+            InlineKeyboardButton(text="◀️", callback_data=f"cal:{action}:{telegram_id}:{prev_year}:{prev_month}"),
+            InlineKeyboardButton(text=f"{month_name} {year}", callback_data="noop"),
+            InlineKeyboardButton(text="▶️", callback_data=f"cal:{action}:{telegram_id}:{next_year}:{next_month}")
+        ],
+        [
+            InlineKeyboardButton(text="Пн", callback_data="noop"),
+            InlineKeyboardButton(text="Вт", callback_data="noop"),
+            InlineKeyboardButton(text="Ср", callback_data="noop"),
+            InlineKeyboardButton(text="Чт", callback_data="noop"),
+            InlineKeyboardButton(text="Пт", callback_data="noop"),
+            InlineKeyboardButton(text="Сб", callback_data="noop"),
+            InlineKeyboardButton(text="Вс", callback_data="noop")
+        ]
+    ]
+ 
+    cal = calendar.Calendar(firstweekday=0)
+    for week in cal.monthdayscalendar(year, month):
+        row = []
+        for day in week:
+            if day == 0:
+                row.append(InlineKeyboardButton(text=" ", callback_data="noop"))
+            else:
+                date_text = f"{day:02d}.{month:02d}.{year}"
+                row.append(InlineKeyboardButton(text=str(day), callback_data=f"date:{action}:{telegram_id}:{date_text}"))
+        buttons.append(row)
+ 
+    buttons.append([InlineKeyboardButton(text="⬅️ К сотруднику", callback_data=f"emp:{telegram_id}")])
+ 
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+ 
+ 
+def shift_rows_keyboard(action, telegram_id, rows):
+    buttons = []
+ 
+    for row_number, row in rows:
+        date_text = row.get("date")
+        shift = row.get("shift")
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"📅 {date_text} | {shift}",
+                callback_data=f"shiftrow:{action}:{row_number}:{telegram_id}"
+            )
+        ])
+ 
+    buttons.append([InlineKeyboardButton(text="⬅️ К сотруднику", callback_data=f"emp:{telegram_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+ 
+ 
+# =========================
+# BASIC COMMANDS
+# =========================
  
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
@@ -219,12 +338,8 @@ async def test_command(message: types.Message):
 @dp.message(F.text == "⬅️ Назад")
 async def back_button(message: types.Message):
     pending_fines.pop(message.from_user.id, None)
-    pending_shift_actions.pop(message.from_user.id, None)
- 
-    await message.answer(
-        "Главное меню",
-        reply_markup=main_keyboard(message.from_user.id)
-    )
+    pending_shift_inputs.pop(message.from_user.id, None)
+    await message.answer("Главное меню", reply_markup=main_keyboard(message.from_user.id))
  
  
 @dp.message(F.text == "👑 Админ-панель")
@@ -236,334 +351,325 @@ async def admin_panel(message: types.Message):
     await message.answer("👑 Админ-панель", reply_markup=admin_keyboard())
  
  
-@dp.message(F.text == "➕ Добавить смену")
-async def start_add_shift(message: types.Message):
+@dp.message(F.text == "👥 Сотрудники")
+async def employees_list(message: types.Message):
     if not is_admin(message.from_user.id):
         return
  
-    pending_shift_actions[message.from_user.id] = {
-        "action": "add",
-        "step": "telegram_id"
-    }
+    employees = get_employees()
  
-    await message.answer("➕ Добавить смену\n\nОтправь Telegram ID сотрудника.")
- 
- 
-@dp.message(F.text == "📣 Отправить напоминание")
-async def start_manual_reminder(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not employees:
+        await message.answer("Пока нет сотрудников с Telegram ID в таблице schedule.")
         return
- 
-    pending_shift_actions[message.from_user.id] = {
-        "action": "remind",
-        "step": "telegram_id"
-    }
  
     await message.answer(
-        "📣 Отправить напоминание\n\n"
-        "Отправь Telegram ID сотрудника."
+        f"👥 Сотрудники с Telegram ID: {len(employees)}\n\nВыбери сотрудника:",
+        reply_markup=employees_keyboard()
     )
  
  
-@dp.message(F.text == "✏️ Изменить смену")
-async def start_edit_shift(message: types.Message):
-    if not is_admin(message.from_user.id):
+@dp.callback_query(F.data.startswith("emp:"))
+async def employee_card(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
         return
  
-    pending_shift_actions[message.from_user.id] = {
-        "action": "edit",
-        "step": "telegram_id"
-    }
+    telegram_id = callback.data.split(":")[1]
+    employee = find_employee_by_telegram_id(telegram_id) or "Неизвестный сотрудник"
  
-    await message.answer(
-        "✏️ Изменить смену\n\n"
-        "Отправь Telegram ID сотрудника."
+    await callback.message.answer(
+        f"👤 {employee}\nID: {telegram_id}\n\nВыбери действие:",
+        reply_markup=employee_card_keyboard(telegram_id)
     )
+    await callback.answer()
  
  
-@dp.message(F.text == "❌ Удалить смену")
-async def start_delete_shift(message: types.Message):
-    if not is_admin(message.from_user.id):
+@dp.callback_query(F.data.startswith("empact:"))
+async def employee_action(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
         return
  
-    pending_shift_actions[message.from_user.id] = {
-        "action": "delete",
-        "step": "telegram_id"
-    }
+    _, action, telegram_id = callback.data.split(":")
+    employee = find_employee_by_telegram_id(telegram_id) or "Неизвестный сотрудник"
  
-    await message.answer(
-        "❌ Удалить смену\n\n"
-        "Отправь Telegram ID сотрудника."
+    if action == "add":
+        await callback.message.answer(
+            f"➕ Добавить смену для {employee}\n\nВыбери дату:",
+            reply_markup=calendar_keyboard("add", telegram_id)
+        )
+ 
+    elif action == "remind":
+        rows = find_schedule_rows_by_id(telegram_id, only_future=True)
+        if not rows:
+            await callback.message.answer("У сотрудника нет будущих смен.")
+        else:
+            await callback.message.answer(
+                f"📣 Выбери смену для напоминания: {employee}",
+                reply_markup=shift_rows_keyboard("remind", telegram_id, rows[:20])
+            )
+ 
+    elif action == "edit":
+        rows = find_schedule_rows_by_id(telegram_id, only_future=True)
+        if not rows:
+            await callback.message.answer("У сотрудника нет будущих смен для изменения.")
+        else:
+            await callback.message.answer(
+                f"✏️ Выбери смену для изменения: {employee}",
+                reply_markup=shift_rows_keyboard("edit", telegram_id, rows[:20])
+            )
+ 
+    elif action == "delete":
+        rows = find_schedule_rows_by_id(telegram_id, only_future=True)
+        if not rows:
+            await callback.message.answer("У сотрудника нет будущих смен для удаления.")
+        else:
+            await callback.message.answer(
+                f"❌ Выбери смену для удаления: {employee}",
+                reply_markup=shift_rows_keyboard("delete", telegram_id, rows[:20])
+            )
+ 
+    elif action == "shifts":
+        rows = find_schedule_rows_by_id(telegram_id, only_future=True)
+        if not rows:
+            await callback.message.answer("У сотрудника нет ближайших смен.")
+        else:
+            lines = []
+            for _, row in rows[:15]:
+                shift = row.get("shift")
+                try:
+                    hours = parse_hours(shift)
+                except Exception:
+                    hours = 0
+                confirmed = "✅" if str(row.get("confirmed", "")).strip().upper() == "YES" else "⏳"
+                lines.append(f"{confirmed} {row.get('date')} | {shift} | {hours} ч.")
+            await callback.message.answer(f"📅 Смены сотрудника {employee}:\n\n" + "\n".join(lines))
+ 
+    elif action == "fine":
+        pending_fines[callback.from_user.id] = {
+            "step": "amount",
+            "telegram_id": telegram_id,
+            "employee": employee
+        }
+        await callback.message.answer(
+            f"💸 Штраф для {employee}\n\nОтправь сумму штрафа числом."
+        )
+ 
+    elif action == "hours":
+        records = sheet.get_all_records()
+        total = 0
+        count = 0
+        for row in records:
+            if str(row.get("telegram_id", "")).strip() == telegram_id and str(row.get("confirmed", "")).strip().upper() == "YES":
+                total += get_confirmed_hours(row)
+                count += 1
+        await callback.message.answer(f"📊 {employee}\n\nПодтверждено смен: {count}\nВсего часов: {total:g}")
+ 
+    await callback.answer()
+ 
+ 
+@dp.callback_query(F.data.startswith("cal:"))
+async def calendar_change(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+ 
+    _, action, telegram_id, year, month = callback.data.split(":")
+    await callback.message.edit_reply_markup(reply_markup=calendar_keyboard(action, telegram_id, int(year), int(month)))
+    await callback.answer()
+ 
+ 
+@dp.callback_query(F.data.startswith("date:"))
+async def date_selected(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+ 
+    _, action, telegram_id, date_text = callback.data.split(":")
+    employee = find_employee_by_telegram_id(telegram_id) or "Неизвестный сотрудник"
+ 
+    if action == "add":
+        pending_shift_inputs[callback.from_user.id] = {
+            "action": "add",
+            "telegram_id": telegram_id,
+            "employee": employee,
+            "date": date_text
+        }
+        await callback.message.answer(
+            f"➕ Добавить смену\n\n"
+            f"👤 {employee}\n"
+            f"📅 {date_text}\n\n"
+            f"Теперь отправь время смены. Например: 8-22"
+        )
+ 
+    await callback.answer()
+ 
+ 
+@dp.callback_query(F.data.startswith("shiftrow:"))
+async def shift_row_action(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+ 
+    _, action, row_number, telegram_id = callback.data.split(":")
+    row_number = int(row_number)
+    headers = get_headers()
+    row_values = sheet.row_values(row_number)
+ 
+    employee = get_row_value(row_values, headers, "employee")
+    shift_date = get_row_value(row_values, headers, "date")
+    shift = get_row_value(row_values, headers, "shift")
+ 
+    if action == "remind":
+        await send_shift_message(telegram_id, employee, shift_date, shift, row_number, title="📣 Напоминание от администратора")
+        await callback.message.answer("📣 Напоминание отправлено сотруднику.")
+ 
+    elif action == "edit":
+        pending_shift_inputs[callback.from_user.id] = {
+            "action": "edit",
+            "row_number": row_number,
+            "telegram_id": telegram_id,
+            "employee": employee,
+            "date": shift_date,
+            "old_shift": shift
+        }
+        await callback.message.answer(
+            f"✏️ Изменить смену\n\n"
+            f"👤 {employee}\n"
+            f"📅 {shift_date}\n"
+            f"Сейчас: {shift}\n\n"
+            f"Отправь новое время смены. Например: 10-22"
+        )
+ 
+    elif action == "delete":
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"delok:{row_number}:{telegram_id}")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data=f"emp:{telegram_id}")]
+            ]
+        )
+        await callback.message.answer(
+            f"❌ Удалить смену?\n\n"
+            f"👤 {employee}\n"
+            f"📅 {shift_date}\n"
+            f"🕒 {shift}",
+            reply_markup=keyboard
+        )
+ 
+    await callback.answer()
+ 
+ 
+@dp.callback_query(F.data.startswith("delok:"))
+async def delete_confirm(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+ 
+    _, row_number, telegram_id = callback.data.split(":")
+    row_number = int(row_number)
+ 
+    headers = get_headers()
+    row_values = sheet.row_values(row_number)
+    employee = get_row_value(row_values, headers, "employee")
+    shift_date = get_row_value(row_values, headers, "date")
+    shift = get_row_value(row_values, headers, "shift")
+ 
+    sheet.delete_rows(row_number)
+ 
+    await callback.message.answer(
+        f"❌ Смена удалена\n\n"
+        f"👤 {employee}\n"
+        f"📅 {shift_date}\n"
+        f"🕒 {shift}"
     )
  
+    try:
+        await bot.send_message(
+            int(telegram_id),
+            f"❌ Твоя смена удалена\n\n📅 {shift_date}\n🕒 {shift}"
+        )
+    except Exception as e:
+        await callback.message.answer(f"⚠️ Не удалось уведомить сотрудника: {e}")
+ 
+    await callback.answer("Удалено")
+ 
+ 
+@dp.callback_query(F.data.startswith("notify:"))
+async def notify_after_add(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+ 
+    _, answer, row_number, telegram_id = callback.data.split(":")
+    row_number = int(row_number)
+ 
+    headers = get_headers()
+    row_values = sheet.row_values(row_number)
+    employee = get_row_value(row_values, headers, "employee")
+    shift_date = get_row_value(row_values, headers, "date")
+    shift = get_row_value(row_values, headers, "shift")
+ 
+    if answer == "yes":
+        try:
+            await send_shift_message(telegram_id, employee, shift_date, shift, row_number, title="📅 Тебе добавлена новая смена")
+            await callback.message.answer("📣 Уведомление отправлено сотруднику.")
+        except Exception as e:
+            await callback.message.answer(f"⚠️ Не удалось отправить уведомление: {e}")
+    else:
+        await callback.message.answer("Ок, уведомление не отправлялось.")
+ 
+    await callback.answer()
+ 
+ 
+@dp.callback_query(F.data == "noop")
+async def noop(callback: types.CallbackQuery):
+    await callback.answer()
+ 
+ 
+# =========================
+# REPORTS AND EMPLOYEE BUTTONS
+# =========================
  
 @dp.message(F.text == "📅 Мои ближайшие смены")
 async def my_upcoming_shifts(message: types.Message):
     telegram_id = str(message.from_user.id)
     records = sheet.get_all_records()
     today = datetime.now().date()
- 
     shifts = []
  
     for row in records:
-        if str(row.get("telegram_id")).strip() != telegram_id:
+        if str(row.get("telegram_id", "")).strip() != telegram_id:
             continue
- 
         try:
             shift_date = parse_date(row.get("date")).date()
         except Exception:
             continue
- 
         if shift_date >= today:
             shift = str(row.get("shift")).strip()
             hours = parse_hours(shift)
             confirmed = str(row.get("confirmed", "")).strip().upper()
- 
             status = "✅ подтверждена" if confirmed == "YES" else "⏳ не подтверждена"
- 
-            shifts.append((
-                shift_date,
-                f"📅 {row.get('date')} | 🕒 {shift} | ⏱ {hours} ч. | {status}"
-            ))
+            shifts.append((shift_date, f"📅 {row.get('date')} | 🕒 {shift} | ⏱ {hours} ч. | {status}"))
  
     if not shifts:
         await message.answer("📅 У тебя нет ближайших смен.")
         return
  
     shifts.sort(key=lambda item: item[0])
-    lines = [item[1] for item in shifts[:10]]
- 
-    await message.answer("📅 Твои ближайшие смены:\n\n" + "\n".join(lines))
- 
- 
-@dp.message(F.text == "📋 Подтверждённые смены")
-async def admin_confirmed_shifts(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
- 
-    records = sheet.get_all_records()
-    confirmed = []
- 
-    for row in records:
-        if str(row.get("confirmed", "")).strip().upper() == "YES":
-            hours = get_confirmed_hours(row)
-            confirmed.append(
-                f"✅ {row.get('employee')} | {row.get('date')} | "
-                f"{row.get('shift')} | {hours:g} ч."
-            )
- 
-    if not confirmed:
-        await message.answer("Пока нет подтверждённых смен.")
-        return
- 
-    text = "📋 Подтверждённые смены:\n\n" + "\n".join(confirmed[-30:])
-    await message.answer(text)
- 
- 
-@dp.message(F.text == "⚠️ Проблемные смены")
-async def admin_problem_shifts(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
- 
-    records = problems_sheet.get_all_records()
- 
-    if not records:
-        await message.answer("Проблемных смен пока нет.")
-        return
- 
-    lines = []
- 
-    for row in records[-30:]:
-        lines.append(
-            f"⚠️ {row.get('employee')} | {row.get('shift_date')} | {row.get('shift')}\n"
-            f"Причина: {row.get('problem')}"
-        )
- 
-    text = "⚠️ Проблемные смены:\n\n" + "\n\n".join(lines)
- 
-    for part in split_long_text(text):
-        await message.answer(part)
- 
- 
-@dp.message(F.text == "📊 Часы сотрудников")
-async def admin_employee_hours(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
- 
-    records = sheet.get_all_records()
-    totals = {}
- 
-    for row in records:
-        if str(row.get("confirmed", "")).strip().upper() == "YES":
-            employee = row.get("employee")
-            hours = get_confirmed_hours(row)
-            totals[employee] = totals.get(employee, 0) + hours
- 
-    if not totals:
-        await message.answer("Пока нет подтверждённых часов.")
-        return
- 
-    lines = [
-        f"👤 {employee}: {hours:g} ч."
-        for employee, hours in totals.items()
-    ]
- 
-    await message.answer("📊 Часы сотрудников:\n\n" + "\n".join(lines))
- 
- 
-@dp.message(F.text == "📈 Отчёт за месяц")
-async def admin_month_report(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
- 
-    current_month = datetime.now().strftime("%m.%Y")
-    records = sheet.get_all_records()
-    totals = {}
-    shifts_count = {}
- 
-    for row in records:
-        if str(row.get("confirmed", "")).strip().upper() != "YES":
-            continue
- 
-        date_value = str(row.get("date", "")).strip()
- 
-        if current_month not in date_value:
-            continue
- 
-        employee = row.get("employee")
-        hours = get_confirmed_hours(row)
- 
-        totals[employee] = totals.get(employee, 0) + hours
-        shifts_count[employee] = shifts_count.get(employee, 0) + 1
- 
-    if not totals:
-        await message.answer(f"📈 За месяц {current_month} пока нет подтверждённых смен.")
-        return
- 
-    total_all = sum(totals.values())
- 
-    lines = [
-        f"👤 {employee}: {totals[employee]:g} ч. | смен: {shifts_count[employee]}"
-        for employee in totals
-    ]
- 
-    text = (
-        f"📈 Отчёт за месяц {current_month}\n\n"
-        + "\n".join(lines)
-        + f"\n\nИтого часов: {total_all:g}"
-    )
- 
-    await message.answer(text)
- 
- 
-@dp.message(F.text == "💸 Мои штрафы")
-async def my_fines(message: types.Message):
-    telegram_id = str(message.from_user.id)
-    records = fines_sheet.get_all_records()
- 
-    my_records = [
-        row for row in records
-        if str(row.get("telegram_id")).strip() == telegram_id
-    ]
- 
-    if not my_records:
-        await message.answer("💸 У тебя нет штрафов.")
-        return
- 
-    total = 0
-    lines = []
- 
-    for row in my_records[-20:]:
-        amount = row.get("amount", 0)
- 
-        try:
-            total += float(amount)
-        except Exception:
-            pass
- 
-        lines.append(
-            f"💸 {row.get('created_at')} | {amount} ₽\n"
-            f"Причина: {row.get('reason')}"
-        )
- 
-    text = (
-        "💸 Твои штрафы\n\n"
-        + "\n\n".join(lines)
-        + f"\n\nИтого штрафов: {total:g} ₽"
-    )
- 
-    for part in split_long_text(text):
-        await message.answer(part)
- 
- 
-@dp.message(F.text == "📄 Все штрафы")
-async def all_fines(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
- 
-    records = fines_sheet.get_all_records()
- 
-    if not records:
-        await message.answer("💸 Штрафов пока нет.")
-        return
- 
-    total = 0
-    lines = []
- 
-    for row in records[-40:]:
-        amount = row.get("amount", 0)
- 
-        try:
-            total += float(amount)
-        except Exception:
-            pass
- 
-        lines.append(
-            f"💸 {row.get('employee')} | {row.get('created_at')} | {amount} ₽\n"
-            f"ID: {row.get('telegram_id')}\n"
-            f"Причина: {row.get('reason')}"
-        )
- 
-    text = (
-        "📄 Все штрафы:\n\n"
-        + "\n\n".join(lines)
-        + f"\n\nИтого по показанным: {total:g} ₽"
-    )
- 
-    for part in split_long_text(text):
-        await message.answer(part)
- 
- 
-@dp.message(F.text == "💸 Выписать штраф")
-async def start_fine_create(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
- 
-    pending_fines[message.from_user.id] = {
-        "step": "telegram_id"
-    }
- 
-    await message.answer(
-        "💸 Выписать штраф\n\n"
-        "Отправь Telegram ID сотрудника."
-    )
+    await message.answer("📅 Твои ближайшие смены:\n\n" + "\n".join([item[1] for item in shifts[:10]]))
  
  
 @dp.message(F.text == "📊 Сколько у меня часов")
 async def hours_button(message: types.Message):
     telegram_id = str(message.from_user.id)
     records = sheet.get_all_records()
- 
     total_hours = 0
     confirmed_count = 0
  
     for row in records:
-        if str(row.get("telegram_id")).strip() == telegram_id:
-            confirmed = str(row.get("confirmed", "")).strip().upper()
- 
-            if confirmed == "YES":
-                hours = get_confirmed_hours(row)
-                total_hours += hours
+        if str(row.get("telegram_id", "")).strip() == telegram_id:
+            if str(row.get("confirmed", "")).strip().upper() == "YES":
+                total_hours += get_confirmed_hours(row)
                 confirmed_count += 1
  
     await message.answer(
@@ -573,31 +679,141 @@ async def hours_button(message: types.Message):
     )
  
  
+@dp.message(F.text == "📋 Подтверждённые смены")
+async def admin_confirmed_shifts(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    records = sheet.get_all_records()
+    confirmed = []
+    for row in records:
+        if str(row.get("confirmed", "")).strip().upper() == "YES":
+            hours = get_confirmed_hours(row)
+            confirmed.append(f"✅ {row.get('employee')} | {row.get('date')} | {row.get('shift')} | {hours:g} ч.")
+    if not confirmed:
+        await message.answer("Пока нет подтверждённых смен.")
+        return
+    await message.answer("📋 Подтверждённые смены:\n\n" + "\n".join(confirmed[-30:]))
+ 
+ 
+@dp.message(F.text == "⚠️ Проблемные смены")
+async def admin_problem_shifts(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    records = problems_sheet.get_all_records()
+    if not records:
+        await message.answer("Проблемных смен пока нет.")
+        return
+    lines = []
+    for row in records[-30:]:
+        lines.append(f"⚠️ {row.get('employee')} | {row.get('shift_date')} | {row.get('shift')}\nПричина: {row.get('problem')}")
+    for part in split_long_text("⚠️ Проблемные смены:\n\n" + "\n\n".join(lines)):
+        await message.answer(part)
+ 
+ 
+@dp.message(F.text == "📊 Часы сотрудников")
+async def admin_employee_hours(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    records = sheet.get_all_records()
+    totals = {}
+    for row in records:
+        if str(row.get("confirmed", "")).strip().upper() == "YES":
+            employee = row.get("employee")
+            totals[employee] = totals.get(employee, 0) + get_confirmed_hours(row)
+    if not totals:
+        await message.answer("Пока нет подтверждённых часов.")
+        return
+    lines = [f"👤 {employee}: {hours:g} ч." for employee, hours in totals.items()]
+    await message.answer("📊 Часы сотрудников:\n\n" + "\n".join(lines))
+ 
+ 
+@dp.message(F.text == "📈 Отчёт за месяц")
+async def admin_month_report(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    current_month = datetime.now().strftime("%m.%Y")
+    records = sheet.get_all_records()
+    totals = {}
+    shifts_count = {}
+    for row in records:
+        if str(row.get("confirmed", "")).strip().upper() != "YES":
+            continue
+        if current_month not in str(row.get("date", "")).strip():
+            continue
+        employee = row.get("employee")
+        totals[employee] = totals.get(employee, 0) + get_confirmed_hours(row)
+        shifts_count[employee] = shifts_count.get(employee, 0) + 1
+    if not totals:
+        await message.answer(f"📈 За месяц {current_month} пока нет подтверждённых смен.")
+        return
+    total_all = sum(totals.values())
+    lines = [f"👤 {employee}: {totals[employee]:g} ч. | смен: {shifts_count[employee]}" for employee in totals]
+    await message.answer(f"📈 Отчёт за месяц {current_month}\n\n" + "\n".join(lines) + f"\n\nИтого часов: {total_all:g}")
+ 
+ 
+# =========================
+# FINES
+# =========================
+ 
+@dp.message(F.text == "💸 Мои штрафы")
+async def my_fines(message: types.Message):
+    telegram_id = str(message.from_user.id)
+    records = fines_sheet.get_all_records()
+    my_records = [row for row in records if str(row.get("telegram_id", "")).strip() == telegram_id]
+    if not my_records:
+        await message.answer("💸 У тебя нет штрафов.")
+        return
+    total = 0
+    lines = []
+    for row in my_records[-20:]:
+        amount = row.get("amount", 0)
+        try:
+            total += float(amount)
+        except Exception:
+            pass
+        lines.append(f"💸 {row.get('created_at')} | {amount} ₽\nПричина: {row.get('reason')}")
+    for part in split_long_text("💸 Твои штрафы\n\n" + "\n\n".join(lines) + f"\n\nИтого штрафов: {total:g} ₽"):
+        await message.answer(part)
+ 
+ 
+@dp.message(F.text == "📄 Все штрафы")
+async def all_fines(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    records = fines_sheet.get_all_records()
+    if not records:
+        await message.answer("💸 Штрафов пока нет.")
+        return
+    total = 0
+    lines = []
+    for row in records[-40:]:
+        amount = row.get("amount", 0)
+        try:
+            total += float(amount)
+        except Exception:
+            pass
+        lines.append(f"💸 {row.get('employee')} | {row.get('created_at')} | {amount} ₽\nID: {row.get('telegram_id')}\nПричина: {row.get('reason')}")
+    for part in split_long_text("📄 Все штрафы:\n\n" + "\n\n".join(lines) + f"\n\nИтого по показанным: {total:g} ₽"):
+        await message.answer(part)
+ 
+ 
+# =========================
+# NOTIFICATIONS AND CALLBACKS
+# =========================
+ 
 async def send_shift_notifications():
     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y")
     records = sheet.get_all_records()
- 
     print(f"Проверяем смены на {tomorrow}")
- 
     for index, row in enumerate(records, start=2):
         try:
             employee = row["employee"]
             telegram_id = str(row["telegram_id"]).strip()
             shift_date = str(row["date"]).strip()
             shift = str(row["shift"]).strip()
- 
             if shift_date == tomorrow:
-                await send_shift_message(
-                    telegram_id=telegram_id,
-                    employee=employee,
-                    shift_date=shift_date,
-                    shift=shift,
-                    row_number=index,
-                    title="📅 Напоминание о смене"
-                )
- 
+                await send_shift_message(telegram_id, employee, shift_date, shift, index)
                 print(f"Отправлено: {employee}")
- 
         except Exception as e:
             print(f"Ошибка: {e}")
  
@@ -607,43 +823,20 @@ async def confirm_shift(callback: types.CallbackQuery):
     row_number = int(callback.data.split(":")[1])
     headers = get_headers()
     row = sheet.row_values(row_number)
- 
     confirmed_current = get_row_value(row, headers, "confirmed").strip().upper()
- 
     if confirmed_current == "YES":
         await callback.answer("Эта смена уже подтверждена", show_alert=True)
         return
- 
     employee = get_row_value(row, headers, "employee")
     shift_date = get_row_value(row, headers, "date")
     shift = get_row_value(row, headers, "shift")
- 
     hours = parse_hours(shift)
- 
-    confirmed_col = headers["confirmed"]
+    sheet.update_cell(row_number, headers["confirmed"], "YES")
     hours_col = headers.get("confirmed_hours") or headers.get("hours")
- 
-    sheet.update_cell(row_number, confirmed_col, "YES")
     sheet.update_cell(row_number, hours_col, hours)
- 
     await callback.message.edit_reply_markup(reply_markup=None)
- 
-    await callback.message.answer(
-        f"✅ Смена подтверждена\n\n"
-        f"Дата: {shift_date}\n"
-        f"Смена: {shift}\n"
-        f"Часы: {hours}"
-    )
- 
-    await bot.send_message(
-        ADMIN_ID,
-        f"✅ Смена подтверждена\n\n"
-        f"👤 Сотрудник: {employee}\n"
-        f"📅 Дата: {shift_date}\n"
-        f"🕒 Смена: {shift}\n"
-        f"⏱ Часы: {hours}"
-    )
- 
+    await callback.message.answer(f"✅ Смена подтверждена\n\nДата: {shift_date}\nСмена: {shift}\nЧасы: {hours}")
+    await bot.send_message(ADMIN_ID, f"✅ Смена подтверждена\n\n👤 Сотрудник: {employee}\n📅 Дата: {shift_date}\n🕒 Смена: {shift}\n⏱ Часы: {hours}")
     await callback.answer("Смена подтверждена")
  
  
@@ -651,254 +844,85 @@ async def confirm_shift(callback: types.CallbackQuery):
 async def problem_shift(callback: types.CallbackQuery):
     row_number = int(callback.data.split(":")[1])
     pending_problems[callback.from_user.id] = row_number
- 
     await callback.message.answer("⚠️ Опиши проблему со сменой одним сообщением.")
     await callback.answer()
  
  
+# =========================
+# TEXT ROUTER FOR INPUTS
+# =========================
+ 
 @dp.message()
 async def text_router(message: types.Message):
     user_id = message.from_user.id
- 
-    if user_id in pending_shift_actions:
-        await handle_shift_action(message)
+    if user_id in pending_shift_inputs:
+        await handle_shift_input(message)
         return
- 
     if user_id in pending_fines:
         await handle_fine_creation(message)
         return
- 
     if user_id in pending_problems:
         await handle_problem_text(message)
         return
  
  
-async def handle_shift_action(message: types.Message):
+async def handle_shift_input(message: types.Message):
     admin_id = message.from_user.id
-    data = pending_shift_actions.get(admin_id)
- 
+    data = pending_shift_inputs.get(admin_id)
     if not data:
         return
- 
     text = message.text.strip()
-    action = data["action"]
+    action = data.get("action")
  
-    if data["step"] == "telegram_id":
-        data["telegram_id"] = text
-        employee = find_employee_by_telegram_id(text)
-        data["employee"] = employee or "Неизвестный сотрудник"
+    try:
+        hours = parse_hours(text)
+    except Exception:
+        await message.answer("Смена должна быть в формате 8-22 или 08:00-22:00.")
+        return
  
-        data["step"] = "date"
-        pending_shift_actions[admin_id] = data
- 
-        await message.answer(
-            f"Сотрудник: {data['employee']}\n\n"
-            "Теперь отправь дату смены в формате ДД.ММ.ГГГГ."
+    if action == "add":
+        employee = data["employee"]
+        telegram_id = data["telegram_id"]
+        shift_date = data["date"]
+        sheet.append_row([employee, telegram_id, shift_date, text, "", ""])
+        row_number = len(sheet.get_all_values())
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Да, отправить", callback_data=f"notify:yes:{row_number}:{telegram_id}")],
+                [InlineKeyboardButton(text="❌ Нет", callback_data=f"notify:no:{row_number}:{telegram_id}")]
+            ]
         )
+        await message.answer(
+            f"✅ Смена добавлена\n\n👤 {employee}\n📅 {shift_date}\n🕒 {text}\n⏱ {hours} ч.\n\n📣 Отправить уведомление сотруднику?",
+            reply_markup=keyboard
+        )
+        pending_shift_inputs.pop(admin_id, None)
         return
  
-    if data["step"] == "date":
+    if action == "edit":
+        row_number = data["row_number"]
+        headers = get_headers()
+        sheet.update_cell(row_number, headers["shift"], text)
+        sheet.update_cell(row_number, headers["confirmed"], "")
+        hours_col = headers.get("confirmed_hours") or headers.get("hours")
+        sheet.update_cell(row_number, hours_col, "")
+        await message.answer(
+            f"✏️ Смена изменена\n\n👤 {data['employee']}\n📅 {data['date']}\nБыло: {data['old_shift']}\nСтало: {text}\n⏱ {hours} ч.\n\nПодтверждение сброшено."
+        )
         try:
-            parse_date(text)
-        except Exception:
-            await message.answer("Дата должна быть в формате ДД.ММ.ГГГГ. Например: 05.06.2026")
-            return
- 
-        data["date"] = text
- 
-        if action == "remind":
-            rows = find_schedule_rows_by_id_and_date(data["telegram_id"], data["date"])
- 
-            if not rows:
-                await message.answer("Смена не найдена.", reply_markup=admin_keyboard())
-                pending_shift_actions.pop(admin_id, None)
-                return
- 
-            sent = 0
- 
-            for row_number, row in rows:
-                await send_shift_message(
-                    telegram_id=data["telegram_id"],
-                    employee=row.get("employee"),
-                    shift_date=row.get("date"),
-                    shift=row.get("shift"),
-                    row_number=row_number,
-                    title="📣 Напоминание от администратора"
-                )
-                sent += 1
- 
-            await message.answer(
-                f"📣 Напоминание отправлено. Смен найдено: {sent}",
-                reply_markup=admin_keyboard()
-            )
-            pending_shift_actions.pop(admin_id, None)
-            return
- 
-        if action == "delete":
-            rows = find_schedule_rows_by_id_and_date(data["telegram_id"], data["date"])
- 
-            if not rows:
-                await message.answer("Смена не найдена.", reply_markup=admin_keyboard())
-                pending_shift_actions.pop(admin_id, None)
-                return
- 
-            row_number, row = rows[0]
-            employee = row.get("employee")
-            shift = row.get("shift")
-            shift_date = row.get("date")
- 
-            sheet.delete_rows(row_number)
- 
-            await message.answer(
-                f"❌ Смена удалена\n\n"
-                f"👤 {employee}\n"
-                f"📅 {shift_date}\n"
-                f"🕒 {shift}",
-                reply_markup=admin_keyboard()
-            )
- 
-            try:
-                await bot.send_message(
-                    int(data["telegram_id"]),
-                    f"❌ Твоя смена удалена\n\n"
-                    f"📅 Дата: {shift_date}\n"
-                    f"🕒 Смена: {shift}"
-                )
-            except Exception as e:
-                await message.answer(f"⚠️ Не удалось уведомить сотрудника: {e}")
- 
-            pending_shift_actions.pop(admin_id, None)
-            return
- 
-        data["step"] = "shift"
-        pending_shift_actions[admin_id] = data
- 
-        if action == "add":
-            await message.answer("Теперь отправь время смены. Например: 8-22")
-        elif action == "edit":
-            await message.answer("Теперь отправь новое время смены. Например: 10-22")
- 
+            await send_shift_message(data["telegram_id"], data["employee"], data["date"], text, row_number, title="✏️ Твоя смена изменена")
+        except Exception as e:
+            await message.answer(f"⚠️ Смена изменена, но уведомление не отправлено: {e}")
+        pending_shift_inputs.pop(admin_id, None)
         return
- 
-    if data["step"] == "shift":
-        try:
-            hours = parse_hours(text)
-        except Exception:
-            await message.answer("Смена должна быть в формате 8-22 или 08:00-22:00.")
-            return
- 
-        if action == "add":
-            employee = data["employee"]
-            telegram_id = data["telegram_id"]
-            shift_date = data["date"]
-            shift = text
- 
-            sheet.append_row([
-                employee,
-                telegram_id,
-                shift_date,
-                shift,
-                "",
-                ""
-            ])
- 
-            row_number = len(sheet.get_all_values())
- 
-            await message.answer(
-                f"✅ Смена добавлена\n\n"
-                f"👤 {employee}\n"
-                f"📅 {shift_date}\n"
-                f"🕒 {shift}\n"
-                f"⏱ {hours} ч.",
-                reply_markup=admin_keyboard()
-            )
- 
-            try:
-                await send_shift_message(
-                    telegram_id=telegram_id,
-                    employee=employee,
-                    shift_date=shift_date,
-                    shift=shift,
-                    row_number=row_number,
-                    title="📅 Тебе добавлена новая смена"
-                )
-            except Exception as e:
-                await message.answer(f"⚠️ Смена добавлена, но уведомление не отправлено: {e}")
- 
-            pending_shift_actions.pop(admin_id, None)
-            return
- 
-        if action == "edit":
-            rows = find_schedule_rows_by_id_and_date(data["telegram_id"], data["date"])
- 
-            if not rows:
-                await message.answer("Смена не найдена.", reply_markup=admin_keyboard())
-                pending_shift_actions.pop(admin_id, None)
-                return
- 
-            row_number, row = rows[0]
-            headers = get_headers()
- 
-            old_shift = row.get("shift")
-            employee = row.get("employee")
-            shift_date = row.get("date")
- 
-            shift_col = headers["shift"]
-            confirmed_col = headers["confirmed"]
-            hours_col = headers.get("confirmed_hours") or headers.get("hours")
- 
-            sheet.update_cell(row_number, shift_col, text)
-            sheet.update_cell(row_number, confirmed_col, "")
-            sheet.update_cell(row_number, hours_col, "")
- 
-            await message.answer(
-                f"✏️ Смена изменена\n\n"
-                f"👤 {employee}\n"
-                f"📅 {shift_date}\n"
-                f"Было: {old_shift}\n"
-                f"Стало: {text}\n"
-                f"⏱ {hours} ч.\n\n"
-                f"Подтверждение сброшено.",
-                reply_markup=admin_keyboard()
-            )
- 
-            try:
-                await send_shift_message(
-                    telegram_id=data["telegram_id"],
-                    employee=employee,
-                    shift_date=shift_date,
-                    shift=text,
-                    row_number=row_number,
-                    title="✏️ Твоя смена изменена"
-                )
-            except Exception as e:
-                await message.answer(f"⚠️ Смена изменена, но уведомление не отправлено: {e}")
- 
-            pending_shift_actions.pop(admin_id, None)
-            return
  
  
 async def handle_fine_creation(message: types.Message):
     admin_id = message.from_user.id
     data = pending_fines.get(admin_id)
- 
     if not data:
         return
- 
     text = message.text.strip()
- 
-    if data["step"] == "telegram_id":
-        data["telegram_id"] = text
-        employee = find_employee_by_telegram_id(text)
-        data["employee"] = employee or "Неизвестный сотрудник"
-        data["step"] = "amount"
-        pending_fines[admin_id] = data
- 
-        await message.answer(
-            f"Сотрудник: {data['employee']}\n\n"
-            "Теперь отправь сумму штрафа числом."
-        )
-        return
  
     if data["step"] == "amount":
         try:
@@ -906,47 +930,24 @@ async def handle_fine_creation(message: types.Message):
         except Exception:
             await message.answer("Сумма должна быть числом. Например: 500")
             return
- 
         data["amount"] = amount
         data["step"] = "reason"
         pending_fines[admin_id] = data
- 
         await message.answer("Теперь напиши причину штрафа.")
         return
  
     if data["step"] == "reason":
         reason = text
         created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
- 
-        fines_sheet.append_row([
-            created_at,
-            data["employee"],
-            data["telegram_id"],
-            data["amount"],
-            reason,
-            admin_id
-        ])
- 
+        fines_sheet.append_row([created_at, data["employee"], data["telegram_id"], data["amount"], reason, admin_id])
         await message.answer(
-            f"✅ Штраф выписан\n\n"
-            f"👤 Сотрудник: {data['employee']}\n"
-            f"ID: {data['telegram_id']}\n"
-            f"💸 Сумма: {data['amount']:g} ₽\n"
-            f"Причина: {reason}",
+            f"✅ Штраф выписан\n\n👤 Сотрудник: {data['employee']}\nID: {data['telegram_id']}\n💸 Сумма: {data['amount']:g} ₽\nПричина: {reason}",
             reply_markup=admin_keyboard()
         )
- 
         try:
-            await bot.send_message(
-                int(data["telegram_id"]),
-                f"💸 Тебе выписан штраф\n\n"
-                f"Сумма: {data['amount']:g} ₽\n"
-                f"Причина: {reason}\n"
-                f"Дата: {created_at}"
-            )
+            await bot.send_message(int(data["telegram_id"]), f"💸 Тебе выписан штраф\n\nСумма: {data['amount']:g} ₽\nПричина: {reason}\nДата: {created_at}")
         except Exception as e:
             await message.answer(f"⚠️ Не удалось отправить уведомление сотруднику: {e}")
- 
         pending_fines.pop(admin_id, None)
         return
  
@@ -954,51 +955,26 @@ async def handle_fine_creation(message: types.Message):
 async def handle_problem_text(message: types.Message):
     user_id = message.from_user.id
     row_number = pending_problems.pop(user_id)
- 
     headers = get_headers()
     row = sheet.row_values(row_number)
- 
     employee = get_row_value(row, headers, "employee")
     telegram_id = get_row_value(row, headers, "telegram_id")
     shift_date = get_row_value(row, headers, "date")
     shift = get_row_value(row, headers, "shift")
     problem = message.text
     created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
- 
-    problems_sheet.append_row([
-        created_at,
-        employee,
-        telegram_id,
-        shift_date,
-        shift,
-        problem
-    ])
- 
-    await bot.send_message(
-        ADMIN_ID,
-        f"⚠️ Проблема со сменой\n\n"
-        f"👤 Сотрудник: {employee}\n"
-        f"📅 Дата: {shift_date}\n"
-        f"🕒 Смена: {shift}\n\n"
-        f"Причина:\n{problem}"
-    )
- 
+    problems_sheet.append_row([created_at, employee, telegram_id, shift_date, shift, problem])
+    await bot.send_message(ADMIN_ID, f"⚠️ Проблема со сменой\n\n👤 Сотрудник: {employee}\n📅 Дата: {shift_date}\n🕒 Смена: {shift}\n\nПричина:\n{problem}")
     await message.answer("⚠️ Сообщение отправлено администратору.")
  
  
 scheduler = AsyncIOScheduler()
- 
-scheduler.add_job(
-    send_shift_notifications,
-    trigger="cron",
-    hour=20,
-    minute=0
-)
+scheduler.add_job(send_shift_notifications, trigger="cron", hour=20, minute=0)
  
  
 async def main():
     scheduler.start()
-    print("Бот запущен V9 schedule management")
+    print("Бот запущен V10 employees calendar")
     await dp.start_polling(bot)
  
  
