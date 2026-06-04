@@ -38,15 +38,39 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(
 )
  
 client = gspread.authorize(creds)
-sheet = client.open(SPREADSHEET_NAME).worksheet("schedule")
+spreadsheet = client.open(SPREADSHEET_NAME)
+ 
+sheet = spreadsheet.worksheet("schedule")
+problems_sheet = spreadsheet.worksheet("problems")
  
 pending_problems = {}
  
  
-def main_keyboard():
+def is_admin(user_id):
+    return int(user_id) == ADMIN_ID
+ 
+ 
+def main_keyboard(user_id=None):
+    keyboard = [
+        [KeyboardButton(text="📊 Сколько у меня часов")]
+    ]
+ 
+    if user_id and is_admin(user_id):
+        keyboard.append([KeyboardButton(text="👑 Админ-панель")])
+ 
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True
+    )
+ 
+ 
+def admin_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📊 Сколько у меня часов")]
+            [KeyboardButton(text="📋 Подтверждённые смены")],
+            [KeyboardButton(text="⚠️ Проблемные смены")],
+            [KeyboardButton(text="📊 Часы сотрудников")],
+            [KeyboardButton(text="⬅️ Назад")]
         ],
         resize_keyboard=True
     )
@@ -81,13 +105,109 @@ async def start_handler(message: types.Message):
         f"Передай этот ID администратору."
     )
  
-    await message.answer(text, reply_markup=main_keyboard())
+    await message.answer(text, reply_markup=main_keyboard(user_id))
  
  
 @dp.message(Command("test"))
 async def test_command(message: types.Message):
     await send_shift_notifications()
     await message.answer("Тест уведомлений запущен")
+ 
+ 
+@dp.message(F.text == "⬅️ Назад")
+async def back_button(message: types.Message):
+    await message.answer(
+        "Главное меню",
+        reply_markup=main_keyboard(message.from_user.id)
+    )
+ 
+ 
+@dp.message(F.text == "👑 Админ-панель")
+async def admin_panel(message: types.Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("У тебя нет доступа к админ-панели.")
+        return
+ 
+    await message.answer(
+        "👑 Админ-панель",
+        reply_markup=admin_keyboard()
+    )
+ 
+ 
+@dp.message(F.text == "📋 Подтверждённые смены")
+async def admin_confirmed_shifts(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+ 
+    records = sheet.get_all_records()
+    confirmed = []
+ 
+    for row in records:
+        if str(row.get("confirmed", "")).strip().upper() == "YES":
+            confirmed.append(
+                f"✅ {row.get('employee')} | {row.get('date')} | "
+                f"{row.get('shift')} | {row.get('confirmed_hours') or row.get('hours')} ч."
+            )
+ 
+    if not confirmed:
+        await message.answer("Пока нет подтверждённых смен.")
+        return
+ 
+    text = "📋 Подтверждённые смены:\n\n" + "\n".join(confirmed[-30:])
+    await message.answer(text)
+ 
+ 
+@dp.message(F.text == "⚠️ Проблемные смены")
+async def admin_problem_shifts(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+ 
+    records = problems_sheet.get_all_records()
+ 
+    if not records:
+        await message.answer("Проблемных смен пока нет.")
+        return
+ 
+    lines = []
+ 
+    for row in records[-30:]:
+        lines.append(
+            f"⚠️ {row.get('employee')} | {row.get('shift_date')} | {row.get('shift')}\n"
+            f"Причина: {row.get('problem')}"
+        )
+ 
+    text = "⚠️ Проблемные смены:\n\n" + "\n\n".join(lines)
+    await message.answer(text)
+ 
+ 
+@dp.message(F.text == "📊 Часы сотрудников")
+async def admin_employee_hours(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+ 
+    records = sheet.get_all_records()
+    totals = {}
+ 
+    for row in records:
+        if str(row.get("confirmed", "")).strip().upper() == "YES":
+            employee = row.get("employee")
+            hours = row.get("confirmed_hours") or row.get("hours") or 0
+ 
+            try:
+                totals[employee] = totals.get(employee, 0) + float(hours)
+            except Exception:
+                pass
+ 
+    if not totals:
+        await message.answer("Пока нет подтверждённых часов.")
+        return
+ 
+    lines = [
+        f"👤 {employee}: {hours:g} ч."
+        for employee, hours in totals.items()
+    ]
+ 
+    await message.answer("📊 Часы сотрудников:\n\n" + "\n".join(lines))
  
  
 @dp.message(F.text == "📊 Сколько у меня часов")
@@ -231,8 +351,20 @@ async def problem_text_handler(message: types.Message):
     row = sheet.row_values(row_number)
  
     employee = row[headers["employee"] - 1]
+    telegram_id = row[headers["telegram_id"] - 1]
     shift_date = row[headers["date"] - 1]
     shift = row[headers["shift"] - 1]
+    problem = message.text
+    created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+ 
+    problems_sheet.append_row([
+        created_at,
+        employee,
+        telegram_id,
+        shift_date,
+        shift,
+        problem
+    ])
  
     await bot.send_message(
         ADMIN_ID,
@@ -240,7 +372,7 @@ async def problem_text_handler(message: types.Message):
         f"👤 Сотрудник: {employee}\n"
         f"📅 Дата: {shift_date}\n"
         f"🕒 Смена: {shift}\n\n"
-        f"Причина:\n{message.text}"
+        f"Причина:\n{problem}"
     )
  
     await message.answer("⚠️ Сообщение отправлено администратору.")
@@ -258,7 +390,7 @@ scheduler.add_job(
  
 async def main():
     scheduler.start()
-    print("Бот запущен V3")
+    print("Бот запущен V4")
     await dp.start_polling(bot)
  
  
