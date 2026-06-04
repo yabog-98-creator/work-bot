@@ -1,5 +1,6 @@
 import asyncio
 import os
+import json
 from datetime import datetime, timedelta
 
 import gspread
@@ -33,8 +34,10 @@ scope = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-creds = ServiceAccountCredentials.from_json_keyfile_name(
-    "credentials.json",
+google_creds = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
+
+creds = ServiceAccountCredentials.from_json_keyfile_dict(
+    google_creds,
     scope
 )
 
@@ -48,7 +51,6 @@ sheet = client.open(SPREADSHEET_NAME).worksheet("schedule")
 
 @dp.message()
 async def start_handler(message: types.Message):
-
     user_id = message.from_user.id
 
     text = (
