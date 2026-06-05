@@ -424,7 +424,7 @@ async def api_user_handler(request):
         data = build_miniapp_user_data(telegram_id)
         return web.json_response(data, headers={
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type"
         })
     except Exception as e:
@@ -443,7 +443,7 @@ async def api_admin_handler(request):
         status = 200 if data.get("ok") else 403
         return web.json_response(data, status=status, headers={
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type"
         })
     except Exception as e:
@@ -452,6 +452,176 @@ async def api_admin_handler(request):
             status=500,
             headers={"Access-Control-Allow-Origin": "*"}
         )
+ 
+ 
+ 
+async def api_admin_remind_handler(request):
+    try:
+        payload = await request.json()
+        admin_id = str(payload.get("admin_id", "")).strip()
+        telegram_id = str(payload.get("telegram_id", "")).strip()
+ 
+        if not is_admin(admin_id):
+            return web.json_response({"ok": False, "error": "Нет доступа"}, status=403, headers={"Access-Control-Allow-Origin": "*"})
+ 
+        rows = find_schedule_rows_by_id(telegram_id, only_future=True)
+        if not rows:
+            return web.json_response({"ok": False, "error": "У сотрудника нет ближайших смен"}, status=404, headers={"Access-Control-Allow-Origin": "*"})
+ 
+        try:
+            rows = sorted(rows, key=lambda item: parse_date(item[1].get("date")).date())
+        except Exception:
+            pass
+ 
+        row_number, row = rows[0]
+        employee = str(row.get("employee", "Сотрудник"))
+        shift_date = str(row.get("date", ""))
+        shift = str(row.get("shift", ""))
+ 
+        await send_shift_message(
+            telegram_id=telegram_id,
+            employee=employee,
+            shift_date=shift_date,
+            shift=shift,
+            row_number=row_number,
+            title="📣 Напоминание от администратора"
+        )
+ 
+        return web.json_response({
+            "ok": True,
+            "message": "Напоминание отправлено",
+            "employee": employee,
+            "date": shift_date,
+            "shift": shift
+        }, headers={"Access-Control-Allow-Origin": "*"})
+ 
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500, headers={"Access-Control-Allow-Origin": "*"})
+ 
+ 
+async def api_admin_fine_handler(request):
+    try:
+        payload = await request.json()
+        admin_id = str(payload.get("admin_id", "")).strip()
+        telegram_id = str(payload.get("telegram_id", "")).strip()
+        amount_raw = str(payload.get("amount", "")).replace(",", ".").strip()
+        reason = str(payload.get("reason", "")).strip()
+ 
+        if not is_admin(admin_id):
+            return web.json_response({"ok": False, "error": "Нет доступа"}, status=403, headers={"Access-Control-Allow-Origin": "*"})
+ 
+        if not telegram_id:
+            return web.json_response({"ok": False, "error": "Не указан Telegram ID"}, status=400, headers={"Access-Control-Allow-Origin": "*"})
+ 
+        try:
+            amount = float(amount_raw)
+        except Exception:
+            return web.json_response({"ok": False, "error": "Сумма должна быть числом"}, status=400, headers={"Access-Control-Allow-Origin": "*"})
+ 
+        if amount <= 0:
+            return web.json_response({"ok": False, "error": "Сумма должна быть больше 0"}, status=400, headers={"Access-Control-Allow-Origin": "*"})
+ 
+        if not reason:
+            reason = "Без причины"
+ 
+        employee = find_employee_by_telegram_id(telegram_id) or "Неизвестный сотрудник"
+        created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+ 
+        fines_sheet.append_row([
+            created_at,
+            employee,
+            telegram_id,
+            amount,
+            reason,
+            admin_id
+        ])
+ 
+        try:
+            await bot.send_message(
+                int(telegram_id),
+                f"💸 Тебе выписан штраф\n\n"
+                f"Сумма: {amount:g} ₽\n"
+                f"Причина: {reason}\n"
+                f"Дата: {created_at}"
+            )
+        except Exception:
+            pass
+ 
+        return web.json_response({
+            "ok": True,
+            "message": "Штраф выписан",
+            "employee": employee,
+            "amount": amount,
+            "reason": reason
+        }, headers={"Access-Control-Allow-Origin": "*"})
+ 
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500, headers={"Access-Control-Allow-Origin": "*"})
+ 
+ 
+async def api_admin_add_shift_handler(request):
+    try:
+        payload = await request.json()
+        admin_id = str(payload.get("admin_id", "")).strip()
+        telegram_id = str(payload.get("telegram_id", "")).strip()
+        shift_date = str(payload.get("date", "")).strip()
+        shift = str(payload.get("shift", "")).strip()
+        notify = bool(payload.get("notify", True))
+ 
+        if not is_admin(admin_id):
+            return web.json_response({"ok": False, "error": "Нет доступа"}, status=403, headers={"Access-Control-Allow-Origin": "*"})
+ 
+        if not telegram_id:
+            return web.json_response({"ok": False, "error": "Не указан Telegram ID"}, status=400, headers={"Access-Control-Allow-Origin": "*"})
+ 
+        try:
+            parse_date(shift_date)
+        except Exception:
+            return web.json_response({"ok": False, "error": "Дата должна быть в формате ДД.ММ.ГГГГ"}, status=400, headers={"Access-Control-Allow-Origin": "*"})
+ 
+        try:
+            hours = parse_hours(shift)
+        except Exception:
+            return web.json_response({"ok": False, "error": "Смена должна быть в формате 8-22"}, status=400, headers={"Access-Control-Allow-Origin": "*"})
+ 
+        employee = find_employee_by_telegram_id(telegram_id) or "Неизвестный сотрудник"
+ 
+        sheet.append_row([
+            employee,
+            telegram_id,
+            shift_date,
+            shift,
+            "",
+            ""
+        ])
+ 
+        row_number = len(sheet.get_all_values())
+ 
+        if notify:
+            try:
+                await send_shift_message(
+                    telegram_id=telegram_id,
+                    employee=employee,
+                    shift_date=shift_date,
+                    shift=shift,
+                    row_number=row_number,
+                    title="📅 Тебе добавлена новая смена"
+                )
+            except Exception:
+                pass
+ 
+        return web.json_response({
+            "ok": True,
+            "message": "Смена добавлена",
+            "employee": employee,
+            "date": shift_date,
+            "shift": shift,
+            "hours": hours,
+            "row_number": row_number
+        }, headers={"Access-Control-Allow-Origin": "*"})
+ 
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500, headers={"Access-Control-Allow-Origin": "*"})
  
  
 async def api_health_handler(request):
@@ -463,7 +633,7 @@ async def api_health_handler(request):
 async def api_options_handler(request):
     return web.Response(headers={
         "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type"
     })
  
@@ -475,6 +645,12 @@ async def start_api_server():
     api_app.router.add_options("/api/user/{telegram_id}", api_options_handler)
     api_app.router.add_get("/api/admin/{telegram_id}", api_admin_handler)
     api_app.router.add_options("/api/admin/{telegram_id}", api_options_handler)
+    api_app.router.add_post("/api/admin/remind", api_admin_remind_handler)
+    api_app.router.add_options("/api/admin/remind", api_options_handler)
+    api_app.router.add_post("/api/admin/fine", api_admin_fine_handler)
+    api_app.router.add_options("/api/admin/fine", api_options_handler)
+    api_app.router.add_post("/api/admin/add_shift", api_admin_add_shift_handler)
+    api_app.router.add_options("/api/admin/add_shift", api_options_handler)
  
     runner = web.AppRunner(api_app)
     await runner.setup()
@@ -1471,7 +1647,7 @@ scheduler.add_job(send_shift_notifications, trigger="cron", hour=20, minute=0)
 async def main():
     await start_api_server()
     scheduler.start()
-    print("Бот запущен V18 mini app admin panel")
+    print("Бот запущен V20 mini app admin actions")
     await dp.start_polling(bot)
  
  
