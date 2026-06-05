@@ -56,8 +56,9 @@ def main_keyboard(user_id=None):
         [
             KeyboardButton(
                 text="🚀 Открыть приложение",
-                web_app=WebAppInfo(url="https://work-bot-app.vercel.app")
-            )
+                web_app=WebAppInfo(
+    url=f"https://work-bot-app.vercel.app/?tg_id={user_id}"
+)
         ],
         [KeyboardButton(text="🏠 Главное меню")],
         [KeyboardButton(text="📅 Мои смены"), KeyboardButton(text="💰 Моя зарплата")],
