@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import gspread
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
@@ -52,6 +52,12 @@ def is_admin(user_id):
  
 def main_keyboard(user_id=None):
     keyboard = [
+        [
+            KeyboardButton(
+                text="🚀 Открыть приложение",
+                web_app=WebAppInfo(url="https://work-bot-app.vercel.app")
+            )
+        ],
         [KeyboardButton(text="🏠 Главное меню")],
         [KeyboardButton(text="📅 Мои смены"), KeyboardButton(text="💰 Моя зарплата")],
         [KeyboardButton(text="📊 Мои часы"), KeyboardButton(text="💸 Мои штрафы")]
