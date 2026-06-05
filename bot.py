@@ -9,6 +9,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiohttp import web
 from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
  
@@ -231,6 +232,157 @@ def build_user_dashboard(user_id, first_name=""):
         f"✅ К выплате: {salary_after_fines:g} ₽\n\n"
         f"Выбери действие ниже 👇"
     )
+ 
+ 
+ 
+# =========================
+# MINI APP API
+# =========================
+ 
+RAILWAY_PUBLIC_URL = "https://work-bot-production-4b59.up.railway.app"
+ 
+ 
+def get_next_shift_info(telegram_id):
+    future_rows = find_schedule_rows_by_id(telegram_id, only_future=True)
+ 
+    if not future_rows:
+        return None
+ 
+    try:
+        sorted_rows = sorted(
+            future_rows,
+            key=lambda item: parse_date(item[1].get("date")).date()
+        )
+    except Exception:
+        sorted_rows = future_rows
+ 
+    row_number, row = sorted_rows[0]
+    shift_date = str(row.get("date", "")).strip()
+    shift = str(row.get("shift", "")).strip()
+ 
+    try:
+        hours = parse_hours(shift)
+    except Exception:
+        hours = 0
+ 
+    confirmed = str(row.get("confirmed", "")).strip().upper()
+    status = "Подтверждена" if confirmed == "YES" else "Ожидает подтверждения"
+ 
+    return {
+        "row_number": row_number,
+        "date": shift_date,
+        "shift": shift,
+        "hours": hours,
+        "status": status,
+        "confirmed": confirmed == "YES"
+    }
+ 
+ 
+def get_upcoming_shifts_for_api(telegram_id, limit=10):
+    rows = find_schedule_rows_by_id(telegram_id, only_future=True)
+ 
+    try:
+        rows = sorted(rows, key=lambda item: parse_date(item[1].get("date")).date())
+    except Exception:
+        pass
+ 
+    result = []
+ 
+    for row_number, row in rows[:limit]:
+        shift = str(row.get("shift", "")).strip()
+        try:
+            hours = parse_hours(shift)
+        except Exception:
+            hours = 0
+ 
+        confirmed = str(row.get("confirmed", "")).strip().upper()
+ 
+        result.append({
+            "row_number": row_number,
+            "date": str(row.get("date", "")).strip(),
+            "shift": shift,
+            "hours": hours,
+            "confirmed": confirmed == "YES",
+            "status": "Подтверждена" if confirmed == "YES" else "Ожидает"
+        })
+ 
+    return result
+ 
+ 
+def build_miniapp_user_data(telegram_id):
+    employee = find_employee_by_telegram_id(telegram_id) or "Сотрудник"
+ 
+    hours, shifts_count, rate, salary = calculate_salary(telegram_id)
+    fines_count, fines_total = get_employee_fines_total(telegram_id)
+    salary_after_fines = salary - fines_total
+    upcoming_shifts = get_upcoming_shifts_for_api(telegram_id)
+    next_shift = get_next_shift_info(telegram_id)
+ 
+    return {
+        "ok": True,
+        "telegram_id": str(telegram_id),
+        "employee": employee,
+        "role": "admin" if is_admin(telegram_id) else "employee",
+        "hours": hours,
+        "confirmed_shifts": shifts_count,
+        "upcoming_shifts_count": len(upcoming_shifts),
+        "rate": rate,
+        "salary": salary,
+        "fines_count": fines_count,
+        "fines_total": fines_total,
+        "salary_after_fines": salary_after_fines,
+        "next_shift": next_shift,
+        "upcoming_shifts": upcoming_shifts
+    }
+ 
+ 
+async def api_user_handler(request):
+    telegram_id = request.match_info.get("telegram_id")
+ 
+    try:
+        data = build_miniapp_user_data(telegram_id)
+        return web.json_response(data, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type"
+        })
+    except Exception as e:
+        return web.json_response(
+            {"ok": False, "error": str(e)},
+            status=500,
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
+ 
+ 
+async def api_health_handler(request):
+    return web.json_response({"ok": True, "service": "work-bot-api"}, headers={
+        "Access-Control-Allow-Origin": "*"
+    })
+ 
+ 
+async def api_options_handler(request):
+    return web.Response(headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"
+    })
+ 
+ 
+async def start_api_server():
+    api_app = web.Application()
+    api_app.router.add_get("/", api_health_handler)
+    api_app.router.add_get("/api/user/{telegram_id}", api_user_handler)
+    api_app.router.add_options("/api/user/{telegram_id}", api_options_handler)
+ 
+    runner = web.AppRunner(api_app)
+    await runner.setup()
+ 
+    port = int(os.getenv("PORT", "8080"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+ 
+    print(f"Mini App API запущен на порту {port}")
+ 
  
 def split_long_text(text, limit=3500):
     parts = []
@@ -1215,8 +1367,9 @@ scheduler.add_job(send_shift_notifications, trigger="cron", hour=20, minute=0)
  
  
 async def main():
+    await start_api_server()
     scheduler.start()
-    print("Бот запущен V15 employee home")
+    print("Бот запущен V17 mini app real data")
     await dp.start_polling(bot)
  
  
