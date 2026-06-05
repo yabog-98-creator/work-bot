@@ -336,12 +336,112 @@ def build_miniapp_user_data(telegram_id):
     }
  
  
+def build_miniapp_admin_data(admin_id):
+    if not is_admin(admin_id):
+        return {
+            "ok": False,
+            "error": "Нет доступа"
+        }
+ 
+    employees = get_employees()
+    employee_cards = []
+ 
+    total_hours = 0
+    total_salary = 0
+    total_fines = 0
+    total_after_fines = 0
+    total_confirmed_shifts = 0
+    total_upcoming_shifts = 0
+ 
+    for telegram_id, employee in employees:
+        hours, shifts_count, rate, salary = calculate_salary(telegram_id)
+        fines_count, fines_total = get_employee_fines_total(telegram_id)
+        after_fines = salary - fines_total
+        upcoming = get_upcoming_shifts_for_api(telegram_id, limit=3)
+ 
+        total_hours += hours
+        total_salary += salary
+        total_fines += fines_total
+        total_after_fines += after_fines
+        total_confirmed_shifts += shifts_count
+        total_upcoming_shifts += len(upcoming)
+ 
+        employee_cards.append({
+            "telegram_id": str(telegram_id),
+            "employee": employee,
+            "hours": hours,
+            "confirmed_shifts": shifts_count,
+            "rate": rate,
+            "salary": salary,
+            "fines_total": fines_total,
+            "salary_after_fines": after_fines,
+            "upcoming_shifts_count": len(upcoming),
+            "next_shift": upcoming[0] if upcoming else None
+        })
+ 
+    fines_records = fines_sheet.get_all_records()
+    recent_fines = []
+    for row in fines_records[-10:]:
+        recent_fines.append({
+            "created_at": str(row.get("created_at", "")),
+            "employee": str(row.get("employee", "")),
+            "telegram_id": str(row.get("telegram_id", "")),
+            "amount": row.get("amount", 0),
+            "reason": str(row.get("reason", ""))
+        })
+ 
+    problems_records = problems_sheet.get_all_records()
+    recent_problems = []
+    for row in problems_records[-10:]:
+        recent_problems.append({
+            "created_at": str(row.get("created_at", "")),
+            "employee": str(row.get("employee", "")),
+            "shift_date": str(row.get("shift_date", "")),
+            "shift": str(row.get("shift", "")),
+            "problem": str(row.get("problem", ""))
+        })
+ 
+    return {
+        "ok": True,
+        "role": "admin",
+        "employees_count": len(employees),
+        "total_hours": total_hours,
+        "total_confirmed_shifts": total_confirmed_shifts,
+        "total_upcoming_shifts": total_upcoming_shifts,
+        "total_salary": total_salary,
+        "total_fines": total_fines,
+        "total_after_fines": total_after_fines,
+        "employees": employee_cards,
+        "recent_fines": recent_fines,
+        "recent_problems": recent_problems
+    }
+ 
+ 
 async def api_user_handler(request):
     telegram_id = request.match_info.get("telegram_id")
  
     try:
         data = build_miniapp_user_data(telegram_id)
         return web.json_response(data, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type"
+        })
+    except Exception as e:
+        return web.json_response(
+            {"ok": False, "error": str(e)},
+            status=500,
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
+ 
+ 
+async def api_admin_handler(request):
+    admin_id = request.match_info.get("telegram_id")
+ 
+    try:
+        data = build_miniapp_admin_data(admin_id)
+        status = 200 if data.get("ok") else 403
+        return web.json_response(data, status=status, headers={
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type"
@@ -373,6 +473,8 @@ async def start_api_server():
     api_app.router.add_get("/", api_health_handler)
     api_app.router.add_get("/api/user/{telegram_id}", api_user_handler)
     api_app.router.add_options("/api/user/{telegram_id}", api_options_handler)
+    api_app.router.add_get("/api/admin/{telegram_id}", api_admin_handler)
+    api_app.router.add_options("/api/admin/{telegram_id}", api_options_handler)
  
     runner = web.AppRunner(api_app)
     await runner.setup()
@@ -1369,7 +1471,7 @@ scheduler.add_job(send_shift_notifications, trigger="cron", hour=20, minute=0)
 async def main():
     await start_api_server()
     scheduler.start()
-    print("Бот запущен V17 mini app real data")
+    print("Бот запущен V18 mini app admin panel")
     await dp.start_polling(bot)
  
  
