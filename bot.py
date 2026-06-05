@@ -1647,7 +1647,7 @@ scheduler.add_job(send_shift_notifications, trigger="cron", hour=20, minute=0)
 async def main():
     await start_api_server()
     scheduler.start()
-    print("Бот запущен V20 mini app admin actions")
+    print("Бот запущен V21 real admin actions")
     await dp.start_polling(bot)
  
  
