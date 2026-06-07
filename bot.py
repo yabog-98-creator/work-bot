@@ -18,12 +18,12 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_NAME = os.getenv("SPREADSHEET_NAME")
 ADMIN_ID = 5689888528
- 
-# Telegram ID собственников бизнеса.
-# Когда собственник зайдёт в бот и пришлёт тебе свой ID, добавь его сюда.
-OWNER_IDS = [
-    5689888528
-]
+
+# Роли теперь берутся из листа Google Sheets: roles
+# Колонки листа roles:
+# telegram_id | name | role
+# role может быть: owner, admin, employee
+# ADMIN_ID оставлен как аварийный доступ, чтобы ты не потерял доступ.
  
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -43,6 +43,12 @@ sheet = spreadsheet.worksheet("schedule")
 problems_sheet = spreadsheet.worksheet("problems")
 fines_sheet = spreadsheet.worksheet("fines")
 rates_sheet = spreadsheet.worksheet("rates")
+
+try:
+    roles_sheet = spreadsheet.worksheet("roles")
+except Exception:
+    roles_sheet = spreadsheet.add_worksheet(title="roles", rows=100, cols=3)
+    roles_sheet.append_row(["telegram_id", "name", "role"])
  
 pending_problems = {}
 pending_fines = {}
@@ -53,22 +59,42 @@ pending_shift_inputs = {}
 # HELPERS
 # =========================
  
+def get_user_role(user_id):
+    """
+    Роль пользователя берётся из листа Google Sheets roles.
+    Доступные роли: owner, admin, employee.
+    ADMIN_ID всегда имеет доступ как admin, даже если лист roles пустой.
+    """
+    try:
+        if int(user_id) == int(ADMIN_ID):
+            return "admin"
+    except Exception:
+        pass
+
+    try:
+        records = roles_sheet.get_all_records()
+        for row in records:
+            row_id = str(row.get("telegram_id", "")).strip()
+            role = str(row.get("role", "")).strip().lower()
+
+            if row_id == str(user_id).strip() and role in ["owner", "admin", "employee"]:
+                return role
+    except Exception as e:
+        print(f"Ошибка чтения листа roles: {e}")
+
+    return "employee"
+
+
 def is_owner(user_id):
-    try:
-        return int(user_id) in [int(x) for x in OWNER_IDS]
-    except Exception:
-        return False
- 
- 
+    return get_user_role(user_id) == "owner"
+
+
 def is_admin(user_id):
-    try:
-        return int(user_id) == int(ADMIN_ID)
-    except Exception:
-        return False
- 
- 
+    return get_user_role(user_id) == "admin"
+
+
 def has_admin_access(user_id):
-    return is_admin(user_id) or is_owner(user_id)
+    return get_user_role(user_id) in ["owner", "admin"]
  
  
 def main_keyboard(user_id=None):
@@ -84,6 +110,9 @@ def main_keyboard(user_id=None):
         [KeyboardButton(text="📊 Мои часы"), KeyboardButton(text="💸 Мои штрафы")]
     ]
  
+    if user_id and is_owner(user_id):
+        keyboard.append([KeyboardButton(text="🏢 Бизнес-панель")])
+
     if user_id and has_admin_access(user_id):
         keyboard.append([KeyboardButton(text="👑 Панель управления")])
  
@@ -264,6 +293,22 @@ async def cmd_id(message: types.Message):
         f"Отправьте этот ID администратору для подключения доступа.",
         parse_mode="HTML"
     )
+
+
+@dp.message(Command("role"))
+async def cmd_role(message: types.Message):
+    role = get_user_role(message.from_user.id)
+    role_title = {
+        "owner": "🏢 Собственник",
+        "admin": "👑 Администратор",
+        "employee": "👤 Сотрудник"
+    }.get(role, "👤 Сотрудник")
+
+    await message.answer(
+        f"Ваша роль в системе:\n\n{role_title}\n\n"
+        f"Ваш Telegram ID: <code>{message.from_user.id}</code>",
+        parse_mode="HTML"
+    )
  
  
 # =========================
@@ -353,7 +398,7 @@ def build_miniapp_user_data(telegram_id):
         "ok": True,
         "telegram_id": str(telegram_id),
         "employee": employee,
-        "role": "owner" if is_owner(telegram_id) else ("admin" if is_admin(telegram_id) else "employee"),
+        "role": get_user_role(telegram_id),
         "hours": hours,
         "confirmed_shifts": shifts_count,
         "upcoming_shifts_count": len(upcoming_shifts),
@@ -434,7 +479,7 @@ def build_miniapp_admin_data(admin_id):
  
     return {
         "ok": True,
-        "role": "admin",
+        "role": get_user_role(admin_id),
         "employees_count": len(employees),
         "total_hours": total_hours,
         "total_confirmed_shifts": total_confirmed_shifts,
@@ -519,7 +564,7 @@ def build_miniapp_owner_data(owner_id):
  
     return {
         "ok": True,
-        "role": "owner" if is_owner(owner_id) else "admin",
+        "role": get_user_role(owner_id),
         "date": tomorrow,
         "employees_count": len(employees),
         "tomorrow_shifts_count": total_shifts,
@@ -1031,10 +1076,59 @@ async def back_button(message: types.Message):
     await message.answer(build_user_dashboard(message.from_user.id, message.from_user.first_name), reply_markup=main_keyboard(message.from_user.id))
  
  
+
+@dp.message(F.text == "🏢 Бизнес-панель")
+async def owner_business_panel(message: types.Message):
+    if not has_admin_access(message.from_user.id):
+        await message.answer("У тебя нет доступа к бизнес-панели.")
+        return
+
+    data = build_miniapp_owner_data(message.from_user.id)
+
+    if not data.get("ok"):
+        await message.answer("Нет доступа к бизнес-панели.")
+        return
+
+    confirmed = []
+    waiting = []
+
+    for shift in data.get("tomorrow_shifts", []):
+        employee = shift.get("employee", "Сотрудник")
+        shift_time = shift.get("shift", "—")
+        hours = shift.get("hours", 0)
+        line = f"{employee} — {shift_time} ({hours:g} ч.)"
+
+        if shift.get("confirmed"):
+            confirmed.append("✅ " + line)
+        else:
+            waiting.append("⏳ " + line)
+
+    text = (
+        f"🏢 Бизнес-панель\\n\\n"
+        f"📅 Завтра: {data.get('date')}\\n\\n"
+        f"👥 Сотрудников: {data.get('employees_count')}\\n"
+        f"📅 Смен завтра: {data.get('tomorrow_shifts_count')}\\n"
+        f"✅ Подтвердили: {data.get('confirmed_count')}\\n"
+        f"⏳ Ожидают: {data.get('waiting_count')}\\n"
+        f"📊 Подтверждение: {data.get('confirm_percent')}%\\n"
+        f"⏱ Часов завтра: {data.get('total_hours'):g}\\n"
+        f"💰 Фонд оплаты: {data.get('payroll_estimate'):g} ₽\\n"
+    )
+
+    if confirmed:
+        text += "\\n✅ Подтвердили:\\n" + "\\n".join(confirmed[:30]) + "\\n"
+
+    if waiting:
+        text += "\\n⏳ Не подтвердили:\\n" + "\\n".join(waiting[:30]) + "\\n"
+
+    for part in split_long_text(text):
+        await message.answer(part, reply_markup=main_keyboard(message.from_user.id))
+
+
 @dp.message(F.text.in_(["👑 Админ-панель", "👑 Панель управления"]))
 async def admin_panel(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.answer("У тебя нет доступа к админ-панели.")
+    if not has_admin_access(message.from_user.id):
+        await message.answer("У тебя нет доступа к панели управления.")
         return
  
     await message.answer("👑 Панель управления\n\n👥 Сотрудники\n📊 Отчёты\n💰 Финансы\n⚠️ Контроль смен", reply_markup=admin_keyboard())
@@ -1042,7 +1136,7 @@ async def admin_panel(message: types.Message):
  
 @dp.message(F.text == "👥 Сотрудники")
 async def employees_list(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not has_admin_access(message.from_user.id):
         return
  
     employees = get_employees()
@@ -1059,7 +1153,7 @@ async def employees_list(message: types.Message):
  
 @dp.callback_query(F.data.startswith("emp:"))
 async def employee_card(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not has_admin_access(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
  
@@ -1093,7 +1187,7 @@ async def employee_card(callback: types.CallbackQuery):
  
 @dp.callback_query(F.data == "employees:list")
 async def employees_list_callback(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not has_admin_access(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
  
@@ -1111,7 +1205,7 @@ async def employees_list_callback(callback: types.CallbackQuery):
  
 @dp.callback_query(F.data.startswith("empact:"))
 async def employee_action(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not has_admin_access(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
  
@@ -1211,7 +1305,7 @@ async def employee_action(callback: types.CallbackQuery):
  
 @dp.callback_query(F.data.startswith("cal:"))
 async def calendar_change(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not has_admin_access(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
  
@@ -1222,7 +1316,7 @@ async def calendar_change(callback: types.CallbackQuery):
  
 @dp.callback_query(F.data.startswith("date:"))
 async def date_selected(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not has_admin_access(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
  
@@ -1248,7 +1342,7 @@ async def date_selected(callback: types.CallbackQuery):
  
 @dp.callback_query(F.data.startswith("shiftrow:"))
 async def shift_row_action(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not has_admin_access(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
  
@@ -1302,7 +1396,7 @@ async def shift_row_action(callback: types.CallbackQuery):
  
 @dp.callback_query(F.data.startswith("delok:"))
 async def delete_confirm(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not has_admin_access(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
  
@@ -1337,7 +1431,7 @@ async def delete_confirm(callback: types.CallbackQuery):
  
 @dp.callback_query(F.data.startswith("notify:"))
 async def notify_after_add(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not has_admin_access(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
  
@@ -1449,7 +1543,7 @@ async def my_salary(message: types.Message):
  
 @dp.message(F.text == "💰 Зарплаты")
 async def admin_all_salaries(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not has_admin_access(message.from_user.id):
         return
  
     employees = get_employees()
@@ -1489,7 +1583,7 @@ async def admin_all_salaries(message: types.Message):
  
 @dp.message(F.text == "📋 Подтверждённые смены")
 async def admin_confirmed_shifts(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not has_admin_access(message.from_user.id):
         return
     records = sheet.get_all_records()
     confirmed = []
@@ -1505,7 +1599,7 @@ async def admin_confirmed_shifts(message: types.Message):
  
 @dp.message(F.text == "⚠️ Проблемные смены")
 async def admin_problem_shifts(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not has_admin_access(message.from_user.id):
         return
     records = problems_sheet.get_all_records()
     if not records:
@@ -1520,7 +1614,7 @@ async def admin_problem_shifts(message: types.Message):
  
 @dp.message(F.text == "📊 Часы сотрудников")
 async def admin_employee_hours(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not has_admin_access(message.from_user.id):
         return
     records = sheet.get_all_records()
     totals = {}
@@ -1537,7 +1631,7 @@ async def admin_employee_hours(message: types.Message):
  
 @dp.message(F.text == "📈 Отчёт за месяц")
 async def admin_month_report(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not has_admin_access(message.from_user.id):
         return
     current_month = datetime.now().strftime("%m.%Y")
     records = sheet.get_all_records()
@@ -1586,7 +1680,7 @@ async def my_fines(message: types.Message):
  
 @dp.message(F.text == "📄 Все штрафы")
 async def all_fines(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not has_admin_access(message.from_user.id):
         return
     records = fines_sheet.get_all_records()
     if not records:
@@ -1776,14 +1870,130 @@ async def handle_problem_text(message: types.Message):
     await message.answer("⚠️ Сообщение отправлено администратору.")
  
  
+
+async def send_owner_tomorrow_summary():
+    """Сводка собственникам и админам о сменах на завтра."""
+    recipients = set()
+
+    try:
+        records = roles_sheet.get_all_records()
+        for row in records:
+            role = str(row.get("role", "")).strip().lower()
+            telegram_id = str(row.get("telegram_id", "")).strip()
+
+            if role in ["owner", "admin"] and telegram_id:
+                recipients.add(int(telegram_id))
+    except Exception as e:
+        print(f"Ошибка чтения roles для сводки: {e}")
+
+    try:
+        recipients.add(int(ADMIN_ID))
+    except Exception:
+        pass
+
+    for recipient_id in recipients:
+        try:
+            data = build_miniapp_owner_data(recipient_id)
+
+            confirmed = []
+            waiting = []
+
+            for shift in data.get("tomorrow_shifts", []):
+                employee = shift.get("employee", "Сотрудник")
+                shift_time = shift.get("shift", "—")
+                if shift.get("confirmed"):
+                    confirmed.append(f"✅ {employee} — {shift_time}")
+                else:
+                    waiting.append(f"⏳ {employee} — {shift_time}")
+
+            text = (
+                f"🏢 Сводка на завтра\\n\\n"
+                f"📅 Дата: {data.get('date')}\\n"
+                f"👥 Сотрудников: {data.get('employees_count')}\\n"
+                f"📅 Смен завтра: {data.get('tomorrow_shifts_count')}\\n"
+                f"✅ Подтвердили: {data.get('confirmed_count')}\\n"
+                f"⏳ Ожидают: {data.get('waiting_count')}\\n"
+                f"📊 Подтверждение: {data.get('confirm_percent')}%\\n"
+                f"⏱ Часов завтра: {data.get('total_hours'):g}\\n"
+                f"💰 Фонд оплаты: {data.get('payroll_estimate'):g} ₽\\n"
+            )
+
+            if confirmed:
+                text += "\\n✅ Подтвердили:\\n" + "\\n".join(confirmed[:30]) + "\\n"
+
+            if waiting:
+                text += "\\n⏳ Не подтвердили:\\n" + "\\n".join(waiting[:30]) + "\\n"
+
+            for part in split_long_text(text):
+                await bot.send_message(recipient_id, part)
+
+        except Exception as e:
+            print(f"Ошибка отправки owner summary {recipient_id}: {e}")
+
+
+async def send_unconfirmed_shift_alerts():
+    """Контроль неподтверждённых смен на завтра."""
+    recipients = set()
+
+    try:
+        records = roles_sheet.get_all_records()
+        for row in records:
+            role = str(row.get("role", "")).strip().lower()
+            telegram_id = str(row.get("telegram_id", "")).strip()
+
+            if role in ["owner", "admin"] and telegram_id:
+                recipients.add(int(telegram_id))
+    except Exception as e:
+        print(f"Ошибка чтения roles для контроля: {e}")
+
+    try:
+        recipients.add(int(ADMIN_ID))
+    except Exception:
+        pass
+
+    tomorrow = get_tomorrow_date_text()
+    records = sheet.get_all_records()
+    waiting = []
+
+    for row in records:
+        if str(row.get("date", "")).strip() != tomorrow:
+            continue
+
+        confirmed = str(row.get("confirmed", "")).strip().upper() == "YES"
+        if not confirmed:
+            employee = str(row.get("employee", "Сотрудник")).strip()
+            shift = str(row.get("shift", "—")).strip()
+            waiting.append(f"⏳ {employee} — {shift}")
+
+    if not waiting:
+        return
+
+    text = (
+        f"⚠️ Не подтвердили смену на завтра\\n\\n"
+        f"📅 {tomorrow}\\n\\n"
+        + "\\n".join(waiting[:50])
+        + "\\n\\nРекомендуется связаться с сотрудниками."
+    )
+
+    for recipient_id in recipients:
+        try:
+            for part in split_long_text(text):
+                await bot.send_message(recipient_id, part)
+        except Exception as e:
+            print(f"Ошибка отправки unconfirmed alert {recipient_id}: {e}")
+
+
+
 scheduler = AsyncIOScheduler()
-scheduler.add_job(send_shift_notifications, trigger="cron", hour=20, minute=0)
+scheduler.add_job(send_shift_notifications, trigger="cron", hour=18, minute=0)
+scheduler.add_job(send_owner_tomorrow_summary, trigger="cron", hour=20, minute=0)
+scheduler.add_job(send_unconfirmed_shift_alerts, trigger="cron", hour=21, minute=0)
  
  
 async def main():
     await start_api_server()
     scheduler.start()
-    print("Бот запущен V28 owner dashboard")
+    print("Бот запущен V28 Premium Business Dashboard")
     await dp.start_polling(bot)
  
  
