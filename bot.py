@@ -19,6 +19,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_NAME = os.getenv("SPREADSHEET_NAME")
 ADMIN_ID = 5689888528
  
+# Telegram ID собственников бизнеса.
+# Когда собственник зайдёт в бот и пришлёт тебе свой ID, добавь его сюда.
+OWNER_IDS = [
+    5689888528
+]
+ 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
  
@@ -47,8 +53,22 @@ pending_shift_inputs = {}
 # HELPERS
 # =========================
  
+def is_owner(user_id):
+    try:
+        return int(user_id) in [int(x) for x in OWNER_IDS]
+    except Exception:
+        return False
+ 
+ 
 def is_admin(user_id):
-    return int(user_id) == ADMIN_ID
+    try:
+        return int(user_id) == int(ADMIN_ID)
+    except Exception:
+        return False
+ 
+ 
+def has_admin_access(user_id):
+    return is_admin(user_id) or is_owner(user_id)
  
  
 def main_keyboard(user_id=None):
@@ -64,7 +84,7 @@ def main_keyboard(user_id=None):
         [KeyboardButton(text="📊 Мои часы"), KeyboardButton(text="💸 Мои штрафы")]
     ]
  
-    if user_id and is_admin(user_id):
+    if user_id and has_admin_access(user_id):
         keyboard.append([KeyboardButton(text="👑 Панель управления")])
  
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -235,6 +255,17 @@ def build_user_dashboard(user_id, first_name=""):
  
  
  
+ 
+ 
+@dp.message(Command("id"))
+async def cmd_id(message: types.Message):
+    await message.answer(
+        f"Ваш Telegram ID:\n\n<code>{message.from_user.id}</code>\n\n"
+        f"Отправьте этот ID администратору для подключения доступа.",
+        parse_mode="HTML"
+    )
+ 
+ 
 # =========================
 # MINI APP API
 # =========================
@@ -322,7 +353,7 @@ def build_miniapp_user_data(telegram_id):
         "ok": True,
         "telegram_id": str(telegram_id),
         "employee": employee,
-        "role": "admin" if is_admin(telegram_id) else "employee",
+        "role": "owner" if is_owner(telegram_id) else ("admin" if is_admin(telegram_id) else "employee"),
         "hours": hours,
         "confirmed_shifts": shifts_count,
         "upcoming_shifts_count": len(upcoming_shifts),
@@ -337,7 +368,7 @@ def build_miniapp_user_data(telegram_id):
  
  
 def build_miniapp_admin_data(admin_id):
-    if not is_admin(admin_id):
+    if not has_admin_access(admin_id):
         return {
             "ok": False,
             "error": "Нет доступа"
@@ -417,6 +448,109 @@ def build_miniapp_admin_data(admin_id):
     }
  
  
+ 
+ 
+def get_tomorrow_date_text():
+    return (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y")
+ 
+ 
+def build_miniapp_owner_data(owner_id):
+    if not has_admin_access(owner_id):
+        return {
+            "ok": False,
+            "error": "Нет доступа"
+        }
+ 
+    tomorrow = get_tomorrow_date_text()
+    schedule_records = sheet.get_all_records()
+    employees = get_employees()
+ 
+    tomorrow_shifts = []
+    confirmed_count = 0
+    waiting_count = 0
+    total_hours = 0
+    payroll_estimate = 0
+ 
+    for row in schedule_records:
+        row_date = str(row.get("date", "")).strip()
+        if row_date != tomorrow:
+            continue
+ 
+        telegram_id = str(row.get("telegram_id", "")).strip()
+        employee = str(row.get("employee", "")).strip() or find_employee_by_telegram_id(telegram_id) or "Сотрудник"
+        shift = str(row.get("shift", "")).strip()
+        confirmed = str(row.get("confirmed", "")).strip().upper() == "YES"
+ 
+        try:
+            hours = parse_hours(shift)
+        except Exception:
+            hours = 0
+ 
+        rate = get_employee_rate(telegram_id)
+        estimated_pay = hours * rate
+ 
+        if confirmed:
+            confirmed_count += 1
+        else:
+            waiting_count += 1
+ 
+        total_hours += hours
+        payroll_estimate += estimated_pay
+ 
+        tomorrow_shifts.append({
+            "employee": employee,
+            "telegram_id": telegram_id,
+            "date": row_date,
+            "shift": shift,
+            "hours": hours,
+            "rate": rate,
+            "estimated_pay": estimated_pay,
+            "confirmed": confirmed,
+            "status": "Подтверждена" if confirmed else "Ожидает"
+        })
+ 
+    tomorrow_shifts = sorted(
+        tomorrow_shifts,
+        key=lambda item: (not item.get("confirmed"), item.get("shift", ""), item.get("employee", ""))
+    )
+ 
+    total_shifts = len(tomorrow_shifts)
+    confirm_percent = round((confirmed_count / total_shifts) * 100) if total_shifts else 0
+ 
+    return {
+        "ok": True,
+        "role": "owner" if is_owner(owner_id) else "admin",
+        "date": tomorrow,
+        "employees_count": len(employees),
+        "tomorrow_shifts_count": total_shifts,
+        "confirmed_count": confirmed_count,
+        "waiting_count": waiting_count,
+        "confirm_percent": confirm_percent,
+        "total_hours": total_hours,
+        "payroll_estimate": payroll_estimate,
+        "tomorrow_shifts": tomorrow_shifts
+    }
+ 
+ 
+async def api_owner_handler(request):
+    owner_id = request.match_info.get("telegram_id")
+ 
+    try:
+        data = build_miniapp_owner_data(owner_id)
+        status = 200 if data.get("ok") else 403
+        return web.json_response(data, status=status, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type"
+        })
+    except Exception as e:
+        return web.json_response(
+            {"ok": False, "error": str(e)},
+            status=500,
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
+ 
+ 
 async def api_user_handler(request):
     telegram_id = request.match_info.get("telegram_id")
  
@@ -461,7 +595,7 @@ async def api_admin_remind_handler(request):
         admin_id = str(payload.get("admin_id", "")).strip()
         telegram_id = str(payload.get("telegram_id", "")).strip()
  
-        if not is_admin(admin_id):
+        if not has_admin_access(admin_id):
             return web.json_response({"ok": False, "error": "Нет доступа"}, status=403, headers={"Access-Control-Allow-Origin": "*"})
  
         rows = find_schedule_rows_by_id(telegram_id, only_future=True)
@@ -507,7 +641,7 @@ async def api_admin_fine_handler(request):
         amount_raw = str(payload.get("amount", "")).replace(",", ".").strip()
         reason = str(payload.get("reason", "")).strip()
  
-        if not is_admin(admin_id):
+        if not has_admin_access(admin_id):
             return web.json_response({"ok": False, "error": "Нет доступа"}, status=403, headers={"Access-Control-Allow-Origin": "*"})
  
         if not telegram_id:
@@ -568,7 +702,7 @@ async def api_admin_add_shift_handler(request):
         shift = str(payload.get("shift", "")).strip()
         notify = bool(payload.get("notify", True))
  
-        if not is_admin(admin_id):
+        if not has_admin_access(admin_id):
             return web.json_response({"ok": False, "error": "Нет доступа"}, status=403, headers={"Access-Control-Allow-Origin": "*"})
  
         if not telegram_id:
@@ -644,6 +778,8 @@ async def start_api_server():
     api_app.router.add_get("/api/user/{telegram_id}", api_user_handler)
     api_app.router.add_options("/api/user/{telegram_id}", api_options_handler)
     api_app.router.add_get("/api/admin/{telegram_id}", api_admin_handler)
+    api_app.router.add_get("/api/owner/{telegram_id}", api_owner_handler)
+    api_app.router.add_options("/api/owner/{telegram_id}", api_options_handler)
     api_app.router.add_options("/api/admin/{telegram_id}", api_options_handler)
     api_app.router.add_post("/api/admin/remind", api_admin_remind_handler)
     api_app.router.add_options("/api/admin/remind", api_options_handler)
@@ -1647,7 +1783,7 @@ scheduler.add_job(send_shift_notifications, trigger="cron", hour=20, minute=0)
 async def main():
     await start_api_server()
     scheduler.start()
-    print("Бот запущен V21 real admin actions")
+    print("Бот запущен V28 owner dashboard")
     await dp.start_polling(bot)
  
  
