@@ -49,10 +49,24 @@ try:
 except Exception:
     roles_sheet = spreadsheet.add_worksheet(title="roles", rows=100, cols=3)
     roles_sheet.append_row(["telegram_id", "name", "role"])
+
+try:
+    advances_sheet = spreadsheet.worksheet("advances")
+except Exception:
+    advances_sheet = spreadsheet.add_worksheet(title="advances", rows=100, cols=4)
+    advances_sheet.append_row(["telegram_id", "date", "amount", "comment"])
+
+try:
+    news_sheet = spreadsheet.worksheet("news")
+except Exception:
+    news_sheet = spreadsheet.add_worksheet(title="news", rows=100, cols=5)
+    news_sheet.append_row(["created_at", "title", "text", "author_id", "is_active"])
  
 pending_problems = {}
 pending_fines = {}
 pending_shift_inputs = {}
+pending_news = {}
+pending_advances = {}
  
  
 # =========================
@@ -126,6 +140,7 @@ def admin_keyboard():
             [KeyboardButton(text="📋 Подтверждённые смены"), KeyboardButton(text="⚠️ Проблемные смены")],
             [KeyboardButton(text="📊 Часы сотрудников"), KeyboardButton(text="💰 Зарплаты")],
             [KeyboardButton(text="📈 Отчёт за месяц"), KeyboardButton(text="📄 Все штрафы")],
+            [KeyboardButton(text="💸 Авансы"), KeyboardButton(text="📢 Новости")],
             [KeyboardButton(text="⬅️ Назад")]
         ],
         resize_keyboard=True
@@ -229,13 +244,78 @@ def get_employee_fines_total(telegram_id):
  
  
  
+
+def get_employee_advances_total(telegram_id):
+    records = advances_sheet.get_all_records()
+    total = 0
+    count = 0
+    history = []
+
+    for row in records:
+        if str(row.get("telegram_id", "")).strip() == str(telegram_id).strip():
+            try:
+                amount = float(row.get("amount", 0))
+            except Exception:
+                amount = 0
+
+            total += amount
+            count += 1
+            history.append({
+                "date": str(row.get("date", "")),
+                "amount": amount,
+                "comment": str(row.get("comment", ""))
+            })
+
+    return count, total, history
+
+
+def get_active_news(limit=20):
+    records = news_sheet.get_all_records()
+    result = []
+
+    for row in records:
+        is_active = str(row.get("is_active", "")).strip().upper()
+        if is_active in ["YES", "TRUE", "1", "ДА"]:
+            result.append({
+                "created_at": str(row.get("created_at", "")),
+                "title": str(row.get("title", "")),
+                "text": str(row.get("text", "")),
+                "author_id": str(row.get("author_id", "")),
+                "is_active": True
+            })
+
+    return result[-limit:][::-1]
+
+
+def get_all_employee_ids():
+    ids = set()
+
+    for telegram_id, _ in get_employees():
+        try:
+            ids.add(int(telegram_id))
+        except Exception:
+            pass
+
+    try:
+        records = roles_sheet.get_all_records()
+        for row in records:
+            telegram_id = str(row.get("telegram_id", "")).strip()
+            if telegram_id:
+                ids.add(int(telegram_id))
+    except Exception:
+        pass
+
+    return list(ids)
+
+
 def build_user_dashboard(user_id, first_name=""):
     telegram_id = str(user_id)
     employee = find_employee_by_telegram_id(telegram_id) or first_name or "Сотрудник"
  
     hours, shifts_count, rate, salary = calculate_salary(telegram_id)
     fines_count, fines_total = get_employee_fines_total(telegram_id)
-    salary_after_fines = salary - fines_total
+    advances_count, advances_total, _ = get_employee_advances_total(telegram_id)
+    salary_after_fines = salary - fines_total - advances_total
  
     future_rows = find_schedule_rows_by_id(telegram_id, only_future=True)
     upcoming_count = len(future_rows)
@@ -278,6 +358,7 @@ def build_user_dashboard(user_id, first_name=""):
         f"💰 Финансы\n"
         f"💵 Ставка: {rate_text}\n"
         f"💸 Штрафы: {fines_total:g} ₽\n"
+        f"💳 Авансы: {advances_total:g} ₽\n"
         f"✅ К выплате: {salary_after_fines:g} ₽\n\n"
         f"Выбери действие ниже 👇"
     )
@@ -390,7 +471,8 @@ def build_miniapp_user_data(telegram_id):
  
     hours, shifts_count, rate, salary = calculate_salary(telegram_id)
     fines_count, fines_total = get_employee_fines_total(telegram_id)
-    salary_after_fines = salary - fines_total
+    advances_count, advances_total, advances_history = get_employee_advances_total(telegram_id)
+    salary_after_fines = salary - fines_total - advances_total
     upcoming_shifts = get_upcoming_shifts_for_api(telegram_id)
     next_shift = get_next_shift_info(telegram_id)
  
@@ -406,7 +488,11 @@ def build_miniapp_user_data(telegram_id):
         "salary": salary,
         "fines_count": fines_count,
         "fines_total": fines_total,
+        "advances_count": advances_count,
+        "advances_total": advances_total,
+        "advances_history": advances_history,
         "salary_after_fines": salary_after_fines,
+        "news": get_active_news(limit=20),
         "next_shift": next_shift,
         "upcoming_shifts": upcoming_shifts
     }
@@ -426,18 +512,21 @@ def build_miniapp_admin_data(admin_id):
     total_salary = 0
     total_fines = 0
     total_after_fines = 0
+    total_advances = 0
     total_confirmed_shifts = 0
     total_upcoming_shifts = 0
  
     for telegram_id, employee in employees:
         hours, shifts_count, rate, salary = calculate_salary(telegram_id)
         fines_count, fines_total = get_employee_fines_total(telegram_id)
-        after_fines = salary - fines_total
+        advances_count, advances_total, _ = get_employee_advances_total(telegram_id)
+        after_fines = salary - fines_total - advances_total
         upcoming = get_upcoming_shifts_for_api(telegram_id, limit=3)
  
         total_hours += hours
         total_salary += salary
         total_fines += fines_total
+        total_advances += advances_total
         total_after_fines += after_fines
         total_confirmed_shifts += shifts_count
         total_upcoming_shifts += len(upcoming)
@@ -450,6 +539,7 @@ def build_miniapp_admin_data(admin_id):
             "rate": rate,
             "salary": salary,
             "fines_total": fines_total,
+            "advances_total": advances_total,
             "salary_after_fines": after_fines,
             "upcoming_shifts_count": len(upcoming),
             "next_shift": upcoming[0] if upcoming else None
@@ -486,6 +576,7 @@ def build_miniapp_admin_data(admin_id):
         "total_upcoming_shifts": total_upcoming_shifts,
         "total_salary": total_salary,
         "total_fines": total_fines,
+        "total_advances": total_advances,
         "total_after_fines": total_after_fines,
         "employees": employee_cards,
         "recent_fines": recent_fines,
@@ -515,6 +606,8 @@ def build_miniapp_owner_data(owner_id):
     waiting_count = 0
     total_hours = 0
     payroll_estimate = 0
+    total_advances = 0
+    total_fines = 0
  
     for row in schedule_records:
         row_date = str(row.get("date", "")).strip()
@@ -541,6 +634,10 @@ def build_miniapp_owner_data(owner_id):
  
         total_hours += hours
         payroll_estimate += estimated_pay
+        _, employee_advances_total, _ = get_employee_advances_total(telegram_id)
+        _, employee_fines_total = get_employee_fines_total(telegram_id)
+        total_advances += employee_advances_total
+        total_fines += employee_fines_total
  
         tomorrow_shifts.append({
             "employee": employee,
@@ -573,6 +670,10 @@ def build_miniapp_owner_data(owner_id):
         "confirm_percent": confirm_percent,
         "total_hours": total_hours,
         "payroll_estimate": payroll_estimate,
+        "total_advances": total_advances,
+        "total_fines": total_fines,
+        "total_after_deductions": payroll_estimate - total_advances - total_fines,
+        "news": get_active_news(limit=10),
         "tomorrow_shifts": tomorrow_shifts
     }
  
@@ -596,6 +697,80 @@ async def api_owner_handler(request):
         )
  
  
+
+async def api_news_handler(request):
+    try:
+        return web.json_response({"ok": True, "news": get_active_news(limit=30)}, headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type"
+        })
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500, headers={"Access-Control-Allow-Origin": "*"})
+
+
+async def api_admin_advance_handler(request):
+    try:
+        payload = await request.json()
+        admin_id = str(payload.get("admin_id", "")).strip()
+        telegram_id = str(payload.get("telegram_id", "")).strip()
+        amount_raw = str(payload.get("amount", "")).replace(",", ".").strip()
+        comment = str(payload.get("comment", "")).strip() or "Аванс"
+
+        if not has_admin_access(admin_id):
+            return web.json_response({"ok": False, "error": "Нет доступа"}, status=403, headers={"Access-Control-Allow-Origin": "*"})
+
+        try:
+            amount = float(amount_raw)
+        except Exception:
+            return web.json_response({"ok": False, "error": "Сумма должна быть числом"}, status=400, headers={"Access-Control-Allow-Origin": "*"})
+
+        if amount <= 0:
+            return web.json_response({"ok": False, "error": "Сумма должна быть больше 0"}, status=400, headers={"Access-Control-Allow-Origin": "*"})
+
+        created_date = datetime.now().strftime("%d.%m.%Y")
+        advances_sheet.append_row([telegram_id, created_date, amount, comment])
+        employee = find_employee_by_telegram_id(telegram_id) or "Сотрудник"
+
+        try:
+            await bot.send_message(int(telegram_id), f"💳 Тебе выдан аванс\n\nСумма: {amount:g} ₽\nКомментарий: {comment}\nДата: {created_date}")
+        except Exception:
+            pass
+
+        return web.json_response({"ok": True, "message": "Аванс добавлен", "employee": employee, "amount": amount, "comment": comment}, headers={"Access-Control-Allow-Origin": "*"})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500, headers={"Access-Control-Allow-Origin": "*"})
+
+
+async def api_admin_news_handler(request):
+    try:
+        payload = await request.json()
+        admin_id = str(payload.get("admin_id", "")).strip()
+        title = str(payload.get("title", "")).strip()
+        text = str(payload.get("text", "")).strip()
+
+        if not has_admin_access(admin_id):
+            return web.json_response({"ok": False, "error": "Нет доступа"}, status=403, headers={"Access-Control-Allow-Origin": "*"})
+
+        if not title or not text:
+            return web.json_response({"ok": False, "error": "Нужны заголовок и текст новости"}, status=400, headers={"Access-Control-Allow-Origin": "*"})
+
+        created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+        news_sheet.append_row([created_at, title, text, admin_id, "YES"])
+
+        sent = 0
+        for user_id in get_all_employee_ids():
+            try:
+                await bot.send_message(int(user_id), f"📢 Новость компании\n\n<b>{title}</b>\n\n{text}", parse_mode="HTML")
+                sent += 1
+            except Exception:
+                pass
+
+        return web.json_response({"ok": True, "message": "Новость опубликована", "sent": sent}, headers={"Access-Control-Allow-Origin": "*"})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500, headers={"Access-Control-Allow-Origin": "*"})
+
+
 async def api_user_handler(request):
     telegram_id = request.match_info.get("telegram_id")
  
@@ -830,6 +1005,12 @@ async def start_api_server():
     api_app.router.add_options("/api/admin/remind", api_options_handler)
     api_app.router.add_post("/api/admin/fine", api_admin_fine_handler)
     api_app.router.add_options("/api/admin/fine", api_options_handler)
+    api_app.router.add_get("/api/news", api_news_handler)
+    api_app.router.add_options("/api/news", api_options_handler)
+    api_app.router.add_post("/api/admin/advance", api_admin_advance_handler)
+    api_app.router.add_options("/api/admin/advance", api_options_handler)
+    api_app.router.add_post("/api/admin/news", api_admin_news_handler)
+    api_app.router.add_options("/api/admin/news", api_options_handler)
     api_app.router.add_post("/api/admin/add_shift", api_admin_add_shift_handler)
     api_app.router.add_options("/api/admin/add_shift", api_options_handler)
  
@@ -1039,6 +1220,114 @@ def shift_rows_keyboard(action, telegram_id, rows):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
  
  
+
+@dp.message(F.text == "📢 Новости")
+async def admin_news_menu(message: types.Message):
+    if not has_admin_access(message.from_user.id):
+        return
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Опубликовать новость", callback_data="news:create")],
+            [InlineKeyboardButton(text="📋 Последние новости", callback_data="news:list")]
+        ]
+    )
+    await message.answer("📢 Новости компании\n\nВыбери действие:", reply_markup=keyboard)
+
+
+@dp.message(F.text == "💸 Авансы")
+async def admin_advances_menu(message: types.Message):
+    if not has_admin_access(message.from_user.id):
+        return
+
+    employees = get_employees()
+    if not employees:
+        await message.answer("Пока нет сотрудников.")
+        return
+
+    buttons = []
+    for telegram_id, employee in employees:
+        buttons.append([InlineKeyboardButton(text=f"💳 {employee}", callback_data=f"advance:add:{telegram_id}")])
+
+    await message.answer("💸 Выдать аванс\n\nВыбери сотрудника:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+@dp.callback_query(F.data == "news:create")
+async def news_create_start(callback: types.CallbackQuery):
+    if not has_admin_access(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    pending_news[callback.from_user.id] = {"step": "title"}
+    await callback.message.answer("📢 Новая новость\n\nНапиши заголовок новости.")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "news:list")
+async def news_list_callback(callback: types.CallbackQuery):
+    if not has_admin_access(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    news = get_active_news(limit=10)
+    if not news:
+        await callback.message.answer("Пока нет активных новостей.")
+    else:
+        lines = []
+        for item in news:
+            lines.append(f"📢 {item.get('created_at')}\n<b>{item.get('title')}</b>\n{item.get('text')}")
+        for part in split_long_text("📋 Последние новости\n\n" + "\n\n".join(lines)):
+            await callback.message.answer(part, parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("news:publish:"))
+async def news_publish_callback(callback: types.CallbackQuery):
+    if not has_admin_access(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    action = callback.data.split(":")[2]
+    data = pending_news.get(callback.from_user.id)
+    if not data:
+        await callback.answer("Черновик новости не найден", show_alert=True)
+        return
+
+    if action == "cancel":
+        pending_news.pop(callback.from_user.id, None)
+        await callback.message.answer("❌ Публикация новости отменена.")
+        await callback.answer()
+        return
+
+    title = data.get("title", "")
+    text = data.get("text", "")
+    created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+    news_sheet.append_row([created_at, title, text, callback.from_user.id, "YES"])
+
+    sent = 0
+    for user_id in get_all_employee_ids():
+        try:
+            await bot.send_message(int(user_id), f"📢 Новость компании\n\n<b>{title}</b>\n\n{text}", parse_mode="HTML")
+            sent += 1
+        except Exception:
+            pass
+
+    pending_news.pop(callback.from_user.id, None)
+    await callback.message.answer(f"✅ Новость опубликована\n\nОтправлено: {sent} пользователям.")
+    await callback.answer("Опубликовано")
+
+
+@dp.callback_query(F.data.startswith("advance:add:"))
+async def advance_add_start(callback: types.CallbackQuery):
+    if not has_admin_access(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    telegram_id = callback.data.split(":")[2]
+    employee = find_employee_by_telegram_id(telegram_id) or "Сотрудник"
+    pending_advances[callback.from_user.id] = {"step": "amount", "telegram_id": telegram_id, "employee": employee}
+    await callback.message.answer(f"💳 Аванс для {employee}\n\nОтправь сумму аванса числом.")
+    await callback.answer()
+
+
 # =========================
 # BASIC COMMANDS
 # =========================
@@ -1757,6 +2046,12 @@ async def problem_shift(callback: types.CallbackQuery):
 @dp.message()
 async def text_router(message: types.Message):
     user_id = message.from_user.id
+    if user_id in pending_news:
+        await handle_news_creation(message)
+        return
+    if user_id in pending_advances:
+        await handle_advance_creation(message)
+        return
     if user_id in pending_shift_inputs:
         await handle_shift_input(message)
         return
@@ -1768,6 +2063,76 @@ async def text_router(message: types.Message):
         return
  
  
+
+async def handle_news_creation(message: types.Message):
+    user_id = message.from_user.id
+    data = pending_news.get(user_id)
+    if not data:
+        return
+
+    text = message.text.strip()
+    if data.get("step") == "title":
+        data["title"] = text
+        data["step"] = "text"
+        pending_news[user_id] = data
+        await message.answer("Теперь напиши текст новости.")
+        return
+
+    if data.get("step") == "text":
+        data["text"] = text
+        pending_news[user_id] = data
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Опубликовать", callback_data="news:publish:yes")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="news:publish:cancel")]
+            ]
+        )
+        await message.answer(
+            f"📢 Предпросмотр новости\n\n<b>{data.get('title')}</b>\n\n{data.get('text')}\n\nОпубликовать и отправить всем сотрудникам?",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+        return
+
+
+async def handle_advance_creation(message: types.Message):
+    admin_id = message.from_user.id
+    data = pending_advances.get(admin_id)
+    if not data:
+        return
+
+    text = message.text.strip()
+    if data.get("step") == "amount":
+        try:
+            amount = float(text.replace(",", "."))
+        except Exception:
+            await message.answer("Сумма должна быть числом. Например: 3000")
+            return
+        if amount <= 0:
+            await message.answer("Сумма должна быть больше 0.")
+            return
+        data["amount"] = amount
+        data["step"] = "comment"
+        pending_advances[admin_id] = data
+        await message.answer("Теперь напиши комментарий к авансу. Например: Аванс за июнь")
+        return
+
+    if data.get("step") == "comment":
+        comment = text or "Аванс"
+        telegram_id = data["telegram_id"]
+        employee = data["employee"]
+        amount = data["amount"]
+        created_date = datetime.now().strftime("%d.%m.%Y")
+        advances_sheet.append_row([telegram_id, created_date, amount, comment])
+        await message.answer(f"✅ Аванс добавлен\n\n👤 {employee}\n💳 Сумма: {amount:g} ₽\n📝 Комментарий: {comment}", reply_markup=admin_keyboard())
+        try:
+            await bot.send_message(int(telegram_id), f"💳 Тебе выдан аванс\n\nСумма: {amount:g} ₽\nКомментарий: {comment}\nДата: {created_date}")
+        except Exception as e:
+            await message.answer(f"⚠️ Аванс добавлен, но уведомление не отправлено: {e}")
+        pending_advances.pop(admin_id, None)
+        return
+
+
 async def handle_shift_input(message: types.Message):
     admin_id = message.from_user.id
     data = pending_shift_inputs.get(admin_id)
@@ -1993,7 +2358,7 @@ scheduler.add_job(send_unconfirmed_shift_alerts, trigger="cron", hour=21, minute
 async def main():
     await start_api_server()
     scheduler.start()
-    print("Бот запущен V28 Premium Business Dashboard")
+    print("Бот запущен V29 Business Pro")
     await dp.start_polling(bot)
  
  
