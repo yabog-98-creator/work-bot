@@ -37,8 +37,9 @@ google_creds = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
 creds = ServiceAccountCredentials.from_json_keyfile_dict(google_creds, scope)
  
 client = gspread.authorize(creds)
-spreadsheet = client.open(SPREADSHEET_NAME)
- 
+
+spreadsheet = client.open_by_key("1n9hBVddP7WDbWQMwfC2W5-mbpkoUsyt2Km_3FDWd4VA")
+
 sheet = spreadsheet.worksheet("schedule")
 problems_sheet = spreadsheet.worksheet("problems")
 fines_sheet = spreadsheet.worksheet("fines")
